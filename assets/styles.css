@@ -1,0 +1,53 @@
+body {
+    font-family: 'Noto Sans JP', sans-serif;
+    background-color: rgb(19, 16, 15);
+    color:rgb(236, 175, 155)
+}
+
+#content {
+    margin: auto;
+    width: 50%;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    padding: 10px;
+}
+
+.center {
+    text-align: center;
+}
+
+button {
+    background-color: #b36f16; /* Green */
+    border: none;
+    color: white;
+    padding: 15px 32px;
+    text-align: center;
+    text-decoration: none;
+    display: inline-block;
+    font-size: 25pt;
+    border-radius: 6px;
+    margin: 1rem;
+}
+
+.fail {
+    background-color:rgb(153, 12, 12);
+}
+
+.ok{
+    background-color:rgb(158, 172, 30)
+}
+
+.easy{
+    background-color:rgb(48, 179, 16);
+}
+
+.word {
+    color:rgb(236, 175, 155)
+}
+
+.sentence {
+    color:rgb(255, 243, 239);
+    font-size: 60pt;
+}

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h3 class="center word">{{ word }}</h3>
+<h1 class="center sentence">{{ sentence }}</h1>
+<div class="center">
+    <button id="fail" class="fail">Fail</button>
+    <button id="ok" class="ok">Ok</button>
+    <button id="easy" class="easy">Easy</button>
+</div>
+
+
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/2.1.3/jquery.min.js"></script>
+<script>
+$(document).ready(function() {
+    var review_func = function(response_quality) {
+        $.ajax({
+            url: '/review',
+            type: 'POST',
+            dataType: 'json',
+            contentType: 'application/json',
+            data: JSON.stringify({
+                response_quality: response_quality
+            }),
+            success: function(result) {
+                console.log(result);
+
+                // Reload the page to get the next sentence.
+                location.reload();
+            },
+            error: function(xhr, resp, text) {
+                console.error(xhr, resp, text);
+            }
+        });
+    }
+
+    $("#fail").on('click', function() {
+        review_func(0.0);
+    });
+    $("#ok").on('click', function() {
+        review_func(3.0);
+    });
+    $("#easy").on('click', function() {
+        review_func(5.0);
+    });
+});
+</script>
+{% endblock %}
