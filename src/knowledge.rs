@@ -66,6 +66,8 @@ impl WordFrequencyList {
         }
     }
 
+    // This may be a little confusing, but this function returns the words rank in the frequency list.
+    // Infrequent words will have higher values and frequent words will have lower values.
     fn get_word_freq(&self, word: &str) -> i64 {
         match self.words.get(word) {
             Some(freq) => *freq,
@@ -224,18 +226,20 @@ impl Knowledge {
     //     words_that_need_reviewing DESC,
     //     words_that_are_new ASC
 
-
-    async fn get_next_sentence_i_plus_one(&self) -> IPlusOneSentenceData {
+    pub async fn get_next_sentence_i_plus_one(&self) -> IPlusOneSentenceData {
         let end_of_day_time = self.get_end_of_day_time();
         let now_time = Local::now().fixed_offset();
 
+        info!("Attempting to find a sentence to review...");
+
         // First we need to find sentences that are most optimal to meet the criteria of reviewing words that are expired.
+        // Treat a word as needing reviewing if it TODO: explain
         let review_sentence_row = sqlx::query("
             SELECT 
                 word_id, sentence_id, 
                 sentences.text AS sentence_text, sentences.id, 
                 words.next_review_at as review_at, words.reviewed AS reviewed, 
-                SUM(CASE WHEN datetime(words.next_review_at) < datetime(?) THEN 1 ELSE 0 END) as words_that_need_reviewing,
+                SUM(CASE WHEN datetime(words.next_review_at) < datetime(?) AND review_duration >= 86400 OR datetime(next_review_at) < datetime(?) THEN 1 ELSE 0 END) as words_that_need_reviewing,
                 SUM(CASE WHEN words.reviewed = FALSE THEN 1 ELSE 0 END) as words_that_are_new
             FROM word_sentence
                 INNER JOIN sentences ON sentences.id = sentence_id
@@ -248,11 +252,15 @@ impl Knowledge {
             LIMIT 1
             ")
             .bind(end_of_day_time.to_rfc3339())
+            .bind(now_time.to_rfc3339())
             .fetch_one(&self.connection)
             .await.unwrap(); // TODO: error handling.
 
         // If there are no words that need reviewing in the selected sentence then we don't have any sentences to review!
         let words_that_need_reviewing: i64 = review_sentence_row.try_get("words_that_need_reviewing").unwrap();
+        info!("Found a sentence with {} words that need reviewing.", words_that_need_reviewing);
+
+        // If there are words that need reviewing, do that!
         if words_that_need_reviewing > 0 {
             // If we review this sentence we'll be reviewing some of the words we need to review. Return it!
             let sentence_id = review_sentence_row.try_get("sentence_id").unwrap();
@@ -273,7 +281,8 @@ impl Knowledge {
                 word_id, sentence_id, 
                 sentences.text AS sentence_text, sentences.id, 
                 words.reviewed as word_reviewed, 
-                SUM(CASE WHEN words.reviewed = FALSE THEN 1 ELSE 0 END) as new_words
+                SUM(CASE WHEN words.reviewed = FALSE THEN 1 ELSE 0 END) as new_words,
+                AVG(CASE WHEN words.reviewed = FALSE THEN words.frequency ELSE NULL END) as average_new_word_frequency
             FROM word_sentence
                 INNER JOIN sentences ON sentences.id = sentence_id
                 INNER JOIN words ON words.id = word_id
@@ -282,14 +291,14 @@ impl Knowledge {
             HAVING
                 new_words > 0
             ORDER by
-                new_words ASC
-            LIMIT 1")
+                new_words ASC,
+                average_new_word_frequency ASC")
             .fetch_one(&self.connection)
             .await {
 
             Ok(row) => {
-                let sentence_id = review_sentence_row.try_get("sentence_id").unwrap();
-                let sentence_text = review_sentence_row.try_get("sentence_text").unwrap();
+                let sentence_id = row.try_get("sentence_id").unwrap();
+                let sentence_text = row.try_get("sentence_text").unwrap();
                 let words = self.get_words_in_sentence(sentence_id).await;
 
                 IPlusOneSentenceData {
@@ -302,10 +311,18 @@ impl Knowledge {
             Err(e) => {
                 IPlusOneSentenceData {
                     sentence_id: 0,
-                    sentence_text: "".to_string(),
+                    sentence_text: "No sentence with any new words and no words are scheduled for reviewing.".to_string(),
                     words: vec![(0, "".to_string())]
                 }
             }
+        }
+    }
+
+    pub async fn review_sentence(&self, sentence_id: i64, response_quality: f64) {
+        // Find all the words in the sentence and then review them all!
+        let words = self.get_words_in_sentence(sentence_id).await;
+        for (word_id, word_text) in words {
+            self.review_word(word_id, response_quality).await;
         }
     }
 
@@ -450,8 +467,8 @@ impl Knowledge {
         let review_count: i64 = sqlx::query("
             SELECT COUNT(*) FROM words
             WHERE reviewed > 0
-                AND datetime(next_review_at) < datetime(?)
-                OR review_duration >= ? AND datetime(next_review_at) < datetime(?)")
+                AND datetime(next_review_at) < datetime(?) AND review_duration >= ?
+                OR datetime(next_review_at) < datetime(?)")
             .bind(end_of_day_time.to_rfc3339())
             .bind(60 * 60 * 24) // A day in seconds!
             .bind(now_time.to_rfc3339())
@@ -464,7 +481,7 @@ impl Knowledge {
         }
     }
 
-    pub async fn review_sentence(&self, review_word_id: i64, response_quality: f64) {
+    pub async fn review_word(&self, review_word_id: i64, response_quality: f64) {
         // Get data related to the supermemo algorithm from the database.
         let word_row = sqlx::query("
             SELECT id, text, repitition, e_factor, review_duration

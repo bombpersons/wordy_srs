@@ -46,19 +46,17 @@ async fn add_post(State(mut knowledge): State<Knowledge>,
 #[derive(Template)]
 #[template(path = "review.html")]
 struct ReviewTemplate {
-    word: String,
-    word_id: i64,
+    sentence_id: i64,
     sentence: String,
     reviews_today_count: i64
 }
 
 async fn review_get(State(knowledge): State<Knowledge>) -> ReviewTemplate {
-    let sentence_data = knowledge.get_next_sentence().await;
     let review_info = knowledge.get_review_info().await;
+    let sentence_data = knowledge.get_next_sentence_i_plus_one().await;
 
     ReviewTemplate {
-        word: sentence_data.word_text,
-        word_id: sentence_data.word_id,
+        sentence_id: sentence_data.sentence_id,
         sentence: sentence_data.sentence_text,
         reviews_today_count: review_info.reviews_remaining
     }
@@ -66,7 +64,7 @@ async fn review_get(State(knowledge): State<Knowledge>) -> ReviewTemplate {
 
 #[derive(Deserialize)]
 struct ReviewQuery {
-    review_word_id: i64,
+    review_sentence_id: i64,
     response_quality: f64
 }
 
@@ -76,9 +74,9 @@ struct ReviewResponse {
 }
 
 async fn review_post(State(knowledge): State<Knowledge>,
-                     Json(ReviewQuery{ review_word_id, response_quality }): Json<ReviewQuery>) -> Json<ReviewResponse> {
+                     Json(ReviewQuery{ review_sentence_id, response_quality }): Json<ReviewQuery>) -> Json<ReviewResponse> {
     info!("Reviewing with {} quality", response_quality);
-    knowledge.review_sentence(review_word_id, response_quality).await;
+    knowledge.review_sentence(review_sentence_id, response_quality).await;
 
     Json(ReviewResponse {
         success: true

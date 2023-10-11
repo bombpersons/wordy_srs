@@ -1,3 +1,4 @@
 /target
 db.sqlite
 db_backup.sqlite
+db_core2k.sqlite
