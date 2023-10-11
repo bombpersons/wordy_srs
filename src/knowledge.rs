@@ -3,7 +3,7 @@ use std::{collections::{HashSet, HashMap}, str::FromStr, future::Future};
 use log::info;
 use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, ConnectOptions, SqliteConnection, Pool, Sqlite, Row};
 use lindera::tokenizer::Tokenizer;
-use chrono::{Utc, Duration};
+use chrono::{Utc, Duration, FixedOffset, Local};
 use futures::TryStreamExt;
 
 // https://supermemo.guru/wiki/SuperMemo_1.0_for_DOS_(1987)#Algorithm_SM-2
@@ -106,6 +106,14 @@ fn iterate_sentences(text: &str) -> Vec<String> {
     sentences
 }
 
+pub struct ReviewSentenceData {
+    pub sentence_text: String,
+    pub sentence_id: i64,
+
+    pub word_text: String,
+    pub word_id: i64
+}
+
 #[derive(Clone)]
 pub struct Knowledge {
     tokenizer: Tokenizer,
@@ -136,12 +144,12 @@ impl Knowledge {
 
     async fn get_next_word(&self) -> Option<(String, i64)> {
         // Attempt to retrieve the word that is to be reviewed next.
-        let now_time = format!("{}", Utc::now());
+        let now_time = Local::now().fixed_offset().to_rfc3339();
         let mut word_and_id: Option<(String, i64)> = match sqlx::query("
             SELECT repitition, next_review_at, text, id FROM words
-            WHERE reviewd = TRUE
-                AND next_review < ? 
-            ORDER BY next_review at ASC
+            WHERE reviewed > 0
+                AND datetime(next_review_at) < datetime(?)
+            ORDER BY next_review_at ASC
             LIMIT 1")
             .bind(now_time)
             .fetch_one(&self.connection)
@@ -179,7 +187,7 @@ impl Knowledge {
         word_and_id
     }
 
-    pub async fn get_next_sentence(&self) -> (String, String) {
+    pub async fn get_next_sentence(&self) -> ReviewSentenceData {
         // Get the word we're supposed to be reviewing.
         let next_word_and_id = self.get_next_word().await;
 
@@ -235,63 +243,72 @@ impl Knowledge {
                 // Is this lower than our lowest heuristic so far
                 if heuristic < lowest_heuristic {
                     lowest_heuristic = heuristic;
-                    fittest_sentence = Some((next_word.clone(), sentence_text));
+                    fittest_sentence = Some(ReviewSentenceData {
+                        sentence_text,
+                        sentence_id,
+                        word_text: next_word.clone(),
+                        word_id: next_word_id
+                    })
                 }
             }
         }
 
         match fittest_sentence {
-            Some((word, sentence)) => { (word, sentence) },
-            None => { ("".to_string(),"No sentence to review".to_string()) }
+            Some(data) => { 
+                data
+            },
+            None => { 
+                ReviewSentenceData {
+                    sentence_id: 0,
+                    sentence_text: "No sentence to review".to_string(),
+                    word_text: "".to_string(),
+                    word_id: 0
+                }
+             }
         }
     }
 
-    pub async fn review_sentence(&self, response_quality: f64) {
-        // Get the word we are reviewing.
-        let reviewing_word_and_id = self.get_next_word().await;
-        if let Some((_, reviewing_word_id)) = reviewing_word_and_id {
+    pub async fn review_sentence(&self, review_word_id: i64, response_quality: f64) {
+        // Get data related to the supermemo algorithm from the database.
+        let word_row = sqlx::query("
+            SELECT id, text, repitition, e_factor, review_duration
+            FROM words
+                WHERE id = ?")
+            .bind(review_word_id)
+            .fetch_one(&self.connection).await.unwrap(); // TODO: error handling
 
-            // Get data related to the supermemo algorithm from the database.
-            let word_row = sqlx::query("
-                SELECT id, text, repitition, e_factor, review_duration
-                FROM words
-                    WHERE id = ?")
-                .bind(reviewing_word_id)
-                .fetch_one(&self.connection).await.unwrap(); // TODO: error handling
+        let mut sm = SuperMemoItem {
+            repitition: word_row.try_get("repitition").unwrap(),
+            e_factor: word_row.try_get("e_factor").unwrap(),
+            duration: Duration::seconds(word_row.try_get("review_duration").unwrap())
+        };
 
-            let mut sm = SuperMemoItem {
-                repitition: word_row.try_get("repitition").unwrap(),
-                e_factor: word_row.try_get("e_factor").unwrap(),
-                duration: Duration::seconds(word_row.try_get("review_duration").unwrap())
-            };
+        // Calculate the values for the next review.
+        sm = super_memo_2(sm, response_quality);
+        let next_review_at = (Local::now().fixed_offset() + sm.duration).to_rfc3339();
 
-            // Calculate the values for the next review.
-            sm = super_memo_2(sm, response_quality);
-            let next_review_at = format!("{}", Utc::now() + sm.duration);
+        info!("Reviewing word id {}, updated review data: {:?}", review_word_id, &sm);
 
-            info!("Reviewing word id {}, updated review data: {:?}", reviewing_word_id, &sm);
+        // Store it.
+        {
+            let mut tx = self.connection.begin().await.unwrap();
+            sqlx::query("
+                UPDATE words
+                SET repitition = ?,
+                    e_factor = ?,
+                    review_duration = ?,
+                    next_review_at = ?,
+                    reviewed = TRUE
+                WHERE 
+                    id = ?")
+                .bind(sm.repitition)
+                .bind(sm.e_factor)
+                .bind(sm.duration.num_seconds())
+                .bind(next_review_at)
+                .bind(review_word_id)
+                .execute(&mut *tx).await.unwrap(); // TODO: error handling
 
-            // Store it.
-            {
-                let mut tx = self.connection.begin().await.unwrap();
-                sqlx::query("
-                    UPDATE words
-                    SET repitition = ?,
-                        e_factor = ?,
-                        review_duration = ?,
-                        next_review_at = ?,
-                        reviewed = TRUE
-                    WHERE 
-                        id = ?")
-                    .bind(sm.repitition)
-                    .bind(sm.e_factor)
-                    .bind(sm.duration.num_seconds())
-                    .bind(next_review_at)
-                    .bind(reviewing_word_id)
-                    .execute(&mut *tx).await.unwrap(); // TODO: error handling
-
-                tx.commit().await.unwrap(); // TODO: error handling
-            }
+            tx.commit().await.unwrap(); // TODO: error handling
         }
     }
 

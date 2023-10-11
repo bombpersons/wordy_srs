@@ -47,20 +47,23 @@ async fn add_post(State(mut knowledge): State<Knowledge>,
 #[template(path = "review.html")]
 struct ReviewTemplate {
     word: String,
+    word_id: i64,
     sentence: String
 }
 
 async fn review_get(State(knowledge): State<Knowledge>) -> ReviewTemplate {
-    let (word, sentence) = knowledge.get_next_sentence().await;
+    let review_data = knowledge.get_next_sentence().await;
 
     ReviewTemplate {
-        word,
-        sentence
+        word: review_data.word_text,
+        word_id: review_data.word_id,
+        sentence: review_data.sentence_text
     }
 }
 
 #[derive(Deserialize)]
 struct ReviewQuery {
+    review_word_id: i64,
     response_quality: f64
 }
 
@@ -70,9 +73,9 @@ struct ReviewResponse {
 }
 
 async fn review_post(State(knowledge): State<Knowledge>,
-                     Json(ReviewQuery{ response_quality }): Json<ReviewQuery>) -> Json<ReviewResponse> {
+                     Json(ReviewQuery{ review_word_id, response_quality }): Json<ReviewQuery>) -> Json<ReviewResponse> {
     info!("Reviewing with {} quality", response_quality);
-    knowledge.review_sentence(response_quality).await;
+    knowledge.review_sentence(review_word_id, response_quality).await;
 
     Json(ReviewResponse {
         success: true
