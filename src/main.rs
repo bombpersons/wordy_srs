@@ -48,16 +48,19 @@ async fn add_post(State(mut knowledge): State<Knowledge>,
 struct ReviewTemplate {
     word: String,
     word_id: i64,
-    sentence: String
+    sentence: String,
+    reviews_today_count: i64
 }
 
 async fn review_get(State(knowledge): State<Knowledge>) -> ReviewTemplate {
-    let review_data = knowledge.get_next_sentence().await;
+    let sentence_data = knowledge.get_next_sentence().await;
+    let review_info = knowledge.get_review_info().await;
 
     ReviewTemplate {
-        word: review_data.word_text,
-        word_id: review_data.word_id,
-        sentence: review_data.sentence_text
+        word: sentence_data.word_text,
+        word_id: sentence_data.word_id,
+        sentence: sentence_data.sentence_text,
+        reviews_today_count: review_info.reviews_remaining
     }
 }
 

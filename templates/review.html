@@ -1,12 +1,19 @@
 {% extends "base.html" %}
 
 {% block content %}
+
+{% if reviews_today_count > 0 -%}
+<h4 id="reviews" class="center reviews">{{ reviews_today_count }} reviews left today</h4>
+{% else -%}
+<h4 id="new_word_warning" class="center">Reviews are finished for today. All further reviews will be new words!</h4>
+{% endif -%}
+
 <h3 id="word" class="center word" data-word_id="{{ word_id }}">{{ word }}</h3>
 <h1 class="center sentence">{{ sentence }}</h1>
 <div class="center">
-    <button id="fail" class="fail">Fail</button>
-    <button id="ok" class="ok">Ok</button>
-    <button id="easy" class="easy">Easy</button>
+    <button id="fail" class="review_button" data-difficulty="0.0">Fail</button>
+    <button id="ok" class="review_button" data-difficulty="3.0">Ok</button>
+    <button id="easy" class="review_button" data-difficulty="5.0">Easy</button>
 </div>
 
 <script src="https://ajax.googleapis.com/ajax/libs/jquery/2.1.3/jquery.min.js"></script>
@@ -34,14 +41,9 @@ $(document).ready(function() {
         });
     }
 
-    $("#fail").on('click', function() {
-        review_func(0.0);
-    });
-    $("#ok").on('click', function() {
-        review_func(3.0);
-    });
-    $("#easy").on('click', function() {
-        review_func(5.0);
+    $(".review_button").on('click', function() {
+        console.log("HEY");
+        review_func(parseFloat($(this).data("difficulty")));
     });
 });
 </script>

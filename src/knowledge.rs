@@ -3,7 +3,7 @@ use std::{collections::{HashSet, HashMap}, str::FromStr, future::Future};
 use log::info;
 use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, ConnectOptions, SqliteConnection, Pool, Sqlite, Row};
 use lindera::tokenizer::Tokenizer;
-use chrono::{Utc, Duration, FixedOffset, Local};
+use chrono::{Utc, Duration, FixedOffset, Local, Timelike, format::Fixed, DateTime};
 use futures::TryStreamExt;
 
 // https://supermemo.guru/wiki/SuperMemo_1.0_for_DOS_(1987)#Algorithm_SM-2
@@ -106,12 +106,16 @@ fn iterate_sentences(text: &str) -> Vec<String> {
     sentences
 }
 
-pub struct ReviewSentenceData {
+pub struct SentenceData {
+    // The sentence and word that we are reviewing.
     pub sentence_text: String,
     pub sentence_id: i64,
-
     pub word_text: String,
     pub word_id: i64
+}
+
+pub struct ReviewInfoData {
+    pub reviews_remaining: i64
 }
 
 #[derive(Clone)]
@@ -142,16 +146,36 @@ impl Knowledge {
         }
     }
 
-    async fn get_next_word(&self) -> Option<(String, i64)> {
+    fn get_end_of_day_time(&self) -> DateTime<FixedOffset> {
         // Attempt to retrieve the word that is to be reviewed next.
-        let now_time = Local::now().fixed_offset().to_rfc3339();
+        let now_time = Local::now().fixed_offset();
+
+        // Calculate the end of the day (assuming 4am to be the end of the day)
+        let day_end_hour = 4;
+        if now_time.hour() < day_end_hour {
+            now_time.clone().with_hour(day_end_hour)
+        } else {
+            (now_time + Duration::days(1)).with_hour(day_end_hour)
+        }.unwrap() // TODO: error handling.
+    }
+
+    async fn get_next_word(&self) -> Option<(String, i64)> {
+        let end_of_day_time = self.get_end_of_day_time();
+        let now_time = Local::now().fixed_offset();
+
+        // Get any word that expires by the end of today.
+        // Cards that have a duration less than a day, shouldn't be seen ahead of time.
+        // (for example new cards should be seen 10 minutes later, rather than instantly)
         let mut word_and_id: Option<(String, i64)> = match sqlx::query("
-            SELECT repitition, next_review_at, text, id FROM words
+            SELECT review_duration, repitition, next_review_at, text, id FROM words
             WHERE reviewed > 0
                 AND datetime(next_review_at) < datetime(?)
+                OR review_duration >= ? AND datetime(next_review_at) < datetime(?) 
             ORDER BY next_review_at ASC
             LIMIT 1")
-            .bind(now_time)
+            .bind(end_of_day_time.to_rfc3339())
+            .bind(60 * 60 * 24) // A day in seconds!
+            .bind(now_time.to_rfc3339())
             .fetch_one(&self.connection)
             .await {
                 
@@ -187,7 +211,7 @@ impl Knowledge {
         word_and_id
     }
 
-    pub async fn get_next_sentence(&self) -> ReviewSentenceData {
+    pub async fn get_next_sentence(&self) -> SentenceData {
         // Get the word we're supposed to be reviewing.
         let next_word_and_id = self.get_next_word().await;
 
@@ -243,7 +267,7 @@ impl Knowledge {
                 // Is this lower than our lowest heuristic so far
                 if heuristic < lowest_heuristic {
                     lowest_heuristic = heuristic;
-                    fittest_sentence = Some(ReviewSentenceData {
+                    fittest_sentence = Some(SentenceData {
                         sentence_text,
                         sentence_id,
                         word_text: next_word.clone(),
@@ -258,13 +282,35 @@ impl Knowledge {
                 data
             },
             None => { 
-                ReviewSentenceData {
+                SentenceData {
                     sentence_id: 0,
                     sentence_text: "No sentence to review".to_string(),
                     word_text: "".to_string(),
                     word_id: 0
                 }
              }
+        }
+    }
+
+    pub async fn get_review_info(&self) -> ReviewInfoData {
+        // First bit of useful info is how many reviews there are for today.
+        let end_of_day_time = self.get_end_of_day_time();
+        let now_time = Local::now().fixed_offset();
+
+        let review_count: i64 = sqlx::query("
+            SELECT COUNT(*) FROM words
+            WHERE reviewed > 0
+                AND datetime(next_review_at) < datetime(?)
+                OR review_duration >= ? AND datetime(next_review_at) < datetime(?)")
+            .bind(end_of_day_time.to_rfc3339())
+            .bind(60 * 60 * 24) // A day in seconds!
+            .bind(now_time.to_rfc3339())
+            .fetch_one(&self.connection).await.unwrap() // TODO: error handling.
+            .try_get(0).unwrap();
+        
+
+        ReviewInfoData {
+            reviews_remaining: review_count
         }
     }
 

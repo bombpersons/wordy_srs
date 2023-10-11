@@ -19,7 +19,7 @@ body {
 }
 
 button {
-    background-color: #b36f16; /* Green */
+    background-color: #b36f16;
     border: none;
     color: white;
     padding: 15px 32px;
@@ -31,16 +31,20 @@ button {
     margin: 1rem;
 }
 
-.fail {
+#fail {
     background-color:rgb(153, 12, 12);
 }
 
-.ok{
+#ok {
     background-color:rgb(158, 172, 30)
 }
 
-.easy{
+#easy {
     background-color:rgb(48, 179, 16);
+}
+
+#new_word_warning {
+    color: rgb(161, 34, 34)
 }
 
 .word {
@@ -50,4 +54,9 @@ button {
 .sentence {
     color:rgb(255, 243, 239);
     font-size: 60pt;
+}
+
+.reviews {
+    color:rgb(236, 175, 155);
+    font-size: 10pt;
 }
