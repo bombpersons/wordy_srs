@@ -114,6 +114,12 @@ pub struct SentenceData {
     pub word_id: i64
 }
 
+pub struct IPlusOneSentenceData {
+    pub sentence_text: String,
+    pub sentence_id: i64,
+    pub words: Vec<(i64, String)>,
+}
+
 pub struct ReviewInfoData {
     pub reviews_remaining: i64
 }
@@ -157,6 +163,150 @@ impl Knowledge {
         } else {
             (now_time + Duration::days(1)).with_hour(day_end_hour)
         }.unwrap() // TODO: error handling.
+    }
+
+    // Get a vector containing a tuple of word id and word text for all the words in a sentence.
+    async fn get_words_in_sentence(&self, sentence_id: i64) -> Vec<(i64, String)> {
+        let mut words = sqlx::query("
+            SELECT word_id, sentence_id, words.text as word_text
+            FROM word_sentence
+                INNER JOIN words ON words.id = word_id
+            WHERE sentence_id = ?")
+            .bind(sentence_id)
+            .fetch(&self.connection);
+
+        let mut word_vec = Vec::new();
+        while let Some(word_row) = words.try_next().await.unwrap() { // TODO: error handling.
+            word_vec.push((word_row.try_get("word_id").unwrap(), word_row.try_get("word_text").unwrap()));
+        }
+
+        word_vec
+    }
+
+    // [[ This query kind of finds sentences with fewest new words in them. ]]
+    // SELECT word_id, sentence_id, sentences.text AS sentence_text, sentences.id, words.text AS word_text, words.frequency as word_frequency, words.reviewed as word_reviewed, AVG(words.frequency), COUNT(words.frequency)
+    // FROM word_sentence
+    //     INNER JOIN sentences ON sentences.id = sentence_id
+    //     INNER JOIN words ON words.id = word_id
+    // WHERE 
+    //     word_reviewed = FALSE
+    // GROUP BY
+    //     sentence_id
+    // ORDER by
+    //     COUNT(words.frequency)
+    
+    // [[ This query finds a sentence that contains the most words that need to be reviewed now. ]]
+    // SELECT word_id, sentence_id, sentences.text AS sentence_text, sentences.id, words.next_review_at as review_at, AVG(words.frequency), COUNT(words.frequency)
+    // FROM word_sentence
+    //     INNER JOIN sentences ON sentences.id = sentence_id
+    //     INNER JOIN words ON words.id = word_id
+    // WHERE 
+    //     DATETIME(review_at) < DATETIME("2023-10-12T18:42:45+01:00")
+    // GROUP BY
+    //     sentence_id
+    // ORDER BY
+    //     COUNT(words.frequency) DESC
+    // LIMIT 1
+
+    // [[ This query finds sentences that contain the most words that need reviewing with the least amount of unknown words. ]]
+    // SELECT 
+    //     word_id, sentence_id, 
+    //     sentences.text AS sentence_text, sentences.id, 
+    //     words.next_review_at as review_at, words.reviewed AS reviewed, 
+    //     SUM(CASE WHEN datetime(words.next_review_at) < datetime("2023-10-12T18:42:45+01:00") THEN 1 ELSE 0 END) as words_that_need_reviewing,
+    //     SUM(CASE WHEN words.reviewed = FALSE THEN 1 ELSE 0 END) as words_that_are_new
+    // FROM word_sentence
+    //     INNER JOIN sentences ON sentences.id = sentence_id
+    //     INNER JOIN words ON words.id = word_id
+    // GROUP BY
+    //     sentence_id
+    // ORDER BY
+    //     words_that_need_reviewing DESC,
+    //     words_that_are_new ASC
+
+
+    async fn get_next_sentence_i_plus_one(&self) -> IPlusOneSentenceData {
+        let end_of_day_time = self.get_end_of_day_time();
+        let now_time = Local::now().fixed_offset();
+
+        // First we need to find sentences that are most optimal to meet the criteria of reviewing words that are expired.
+        let review_sentence_row = sqlx::query("
+            SELECT 
+                word_id, sentence_id, 
+                sentences.text AS sentence_text, sentences.id, 
+                words.next_review_at as review_at, words.reviewed AS reviewed, 
+                SUM(CASE WHEN datetime(words.next_review_at) < datetime(?) THEN 1 ELSE 0 END) as words_that_need_reviewing,
+                SUM(CASE WHEN words.reviewed = FALSE THEN 1 ELSE 0 END) as words_that_are_new
+            FROM word_sentence
+                INNER JOIN sentences ON sentences.id = sentence_id
+                INNER JOIN words ON words.id = word_id
+            GROUP BY
+                sentence_id
+            ORDER BY
+                words_that_need_reviewing DESC,
+                words_that_are_new ASC
+            LIMIT 1
+            ")
+            .bind(end_of_day_time.to_rfc3339())
+            .fetch_one(&self.connection)
+            .await.unwrap(); // TODO: error handling.
+
+        // If there are no words that need reviewing in the selected sentence then we don't have any sentences to review!
+        let words_that_need_reviewing: i64 = review_sentence_row.try_get("words_that_need_reviewing").unwrap();
+        if words_that_need_reviewing > 0 {
+            // If we review this sentence we'll be reviewing some of the words we need to review. Return it!
+            let sentence_id = review_sentence_row.try_get("sentence_id").unwrap();
+            let sentence_text = review_sentence_row.try_get("sentence_text").unwrap();
+            let words = self.get_words_in_sentence(sentence_id).await;
+
+            return IPlusOneSentenceData {
+                sentence_id,
+                sentence_text,
+                words
+            };
+        }
+
+        // Okay so there aren't any sentences that contain words that we need to review. 
+        // Let's look for sentences that contain the least amount of new information so that we can learn new words.
+        match sqlx::query("
+            SELECT 
+                word_id, sentence_id, 
+                sentences.text AS sentence_text, sentences.id, 
+                words.reviewed as word_reviewed, 
+                SUM(CASE WHEN words.reviewed = FALSE THEN 1 ELSE 0 END) as new_words
+            FROM word_sentence
+                INNER JOIN sentences ON sentences.id = sentence_id
+                INNER JOIN words ON words.id = word_id
+            GROUP BY
+                sentence_id
+            HAVING
+                new_words > 0
+            ORDER by
+                new_words ASC
+            LIMIT 1")
+            .fetch_one(&self.connection)
+            .await {
+
+            Ok(row) => {
+                let sentence_id = review_sentence_row.try_get("sentence_id").unwrap();
+                let sentence_text = review_sentence_row.try_get("sentence_text").unwrap();
+                let words = self.get_words_in_sentence(sentence_id).await;
+
+                IPlusOneSentenceData {
+                    sentence_id,
+                    sentence_text,
+                    words
+                }
+            },
+
+            Err(e) => {
+                IPlusOneSentenceData {
+                    sentence_id: 0,
+                    sentence_text: "".to_string(),
+                    words: vec![(0, "".to_string())]
+                }
+            }
+        }
     }
 
     async fn get_next_word(&self) -> Option<(String, i64)> {
