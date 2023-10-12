@@ -14,6 +14,16 @@ struct SuperMemoItem {
     e_factor: f64
 }
 
+impl Default for SuperMemoItem {
+    fn default() -> Self {
+        SuperMemoItem { 
+            repitition: 0,
+            duration: Duration::zero(),
+            e_factor: 2.5
+        }
+    }
+}
+
 fn mul_duration(duration: Duration, multiplier: f64) -> Duration {
     let new_interval_secs = duration.num_seconds() as f64 * multiplier;
     Duration::seconds(new_interval_secs as i64)
@@ -258,7 +268,8 @@ impl Knowledge {
 
         // If there are no words that need reviewing in the selected sentence then we don't have any sentences to review!
         let words_that_need_reviewing: i64 = review_sentence_row.try_get("words_that_need_reviewing").unwrap();
-        info!("Found a sentence with {} words that need reviewing.", words_that_need_reviewing);
+        let words_that_are_new: i64 = review_sentence_row.try_get("words_that_are_new").unwrap();
+        info!("Found a sentence with {} words that need reviewing and {} new words.", words_that_need_reviewing, words_that_are_new);
 
         // If there are words that need reviewing, do that!
         if words_that_need_reviewing > 0 {
@@ -281,7 +292,7 @@ impl Knowledge {
                 word_id, sentence_id, 
                 sentences.text AS sentence_text, sentences.id, 
                 words.reviewed as word_reviewed, 
-                SUM(CASE WHEN words.reviewed = FALSE THEN 1 ELSE 0 END) as new_words,
+                SUM(CASE WHEN words.reviewed = FALSE THEN 1 ELSE 0 END) as words_that_are_new,
                 AVG(CASE WHEN words.reviewed = FALSE THEN words.frequency ELSE NULL END) as average_new_word_frequency
             FROM word_sentence
                 INNER JOIN sentences ON sentences.id = sentence_id
@@ -289,14 +300,19 @@ impl Knowledge {
             GROUP BY
                 sentence_id
             HAVING
-                new_words > 0
+                words_that_are_new > 0
             ORDER by
-                new_words ASC,
-                average_new_word_frequency ASC")
+            words_that_are_new ASC,
+                average_new_word_frequency ASC
+            LIMIT 1")
             .fetch_one(&self.connection)
             .await {
 
             Ok(row) => {
+                let words_that_are_new: i64 = row.try_get("words_that_are_new").unwrap();
+                let averag_word_freq: f64 = row.try_get("average_new_word_frequency").unwrap();
+                info!("Found a sentence with {} new words with an average {} word frequency", words_that_are_new, averag_word_freq);
+
                 let sentence_id = row.try_get("sentence_id").unwrap();
                 let sentence_text = row.try_get("sentence_text").unwrap();
                 let words = self.get_words_in_sentence(sentence_id).await;
@@ -326,139 +342,6 @@ impl Knowledge {
         }
     }
 
-    async fn get_next_word(&self) -> Option<(String, i64)> {
-        let end_of_day_time = self.get_end_of_day_time();
-        let now_time = Local::now().fixed_offset();
-
-        // Get any word that expires by the end of today.
-        // Cards that have a duration less than a day, shouldn't be seen ahead of time.
-        // (for example new cards should be seen 10 minutes later, rather than instantly)
-        let mut word_and_id: Option<(String, i64)> = match sqlx::query("
-            SELECT review_duration, repitition, next_review_at, text, id FROM words
-            WHERE reviewed > 0
-                AND datetime(next_review_at) < datetime(?)
-                OR review_duration >= ? AND datetime(next_review_at) < datetime(?) 
-            ORDER BY next_review_at ASC
-            LIMIT 1")
-            .bind(end_of_day_time.to_rfc3339())
-            .bind(60 * 60 * 24) // A day in seconds!
-            .bind(now_time.to_rfc3339())
-            .fetch_one(&self.connection)
-            .await {
-                
-                Ok(row) => { 
-                    Some((row.try_get("text").unwrap(), row.try_get("id").unwrap()))
-                }, 
-                Err(e) => {
-                    info!("No scheduled word to review!");
-                    None 
-                }
-        };
-
-        // Find a word that hasn't been reviewed yet then. Use the highest frequency word available.
-        if word_and_id.is_none() {
-            word_and_id = match sqlx::query("
-                SELECT id, text, frequency, reviewed FROM words
-                WHERE reviewed = FALSE
-                ORDER BY frequency ASC
-                LIMIT 1")
-                .fetch_one(&self.connection)
-                .await {
-
-                Ok(row) => {
-                    Some((row.try_get("text").unwrap(), row.try_get("id").unwrap()))
-                },
-                Err(e) => {
-                    info!("No new words to review!");
-                    None
-                }
-            }
-        }
-
-        word_and_id
-    }
-
-    pub async fn get_next_sentence(&self) -> SentenceData {
-        // Get the word we're supposed to be reviewing.
-        let next_word_and_id = self.get_next_word().await;
-
-        // We want to pick the sentence that has the least amount of new information to the user.
-        // Iterate over the words in each sentence and calculate a heuristic based on the 
-        // frequency of the words contained.
-        let mut lowest_heuristic = i64::MAX;
-        let mut fittest_sentence = None;
-
-        // If a word was found...
-        if let Some((next_word, next_word_id)) = next_word_and_id {
-
-            // Now get a list of sentences that include this word.
-            let mut sentences = sqlx::query("
-                SELECT word_id, sentence_id, sentences.id, sentences.text
-                FROM word_sentence
-                    INNER JOIN sentences ON sentence_id = sentences.id
-                WHERE word_id = ?")
-                .bind(next_word_id)
-                .fetch(&self.connection);
-
-            // Iterate over them.
-            while let Some(sentence_row) = sentences.try_next().await.unwrap() { // TODO: error handling.
-                let sentence_id: i64 = sentence_row.try_get("sentence_id").unwrap(); // TODO: error handling.
-                let sentence_text: String = sentence_row.try_get("text").unwrap(); // TODO: error handling.
-
-                // Find all words in the sentence.
-                let mut words = sqlx::query("
-                    SELECT word_id, sentence_id, words.frequency, words.reviewed FROM word_sentence
-                        INNER JOIN words ON word_id = words.id
-                    WHERE sentence_id = ?")
-                    .bind(sentence_id)
-                    .fetch(&self.connection);
-
-                // Calculate our heuristic for new information in the sentence.
-                let mut heuristic = 0;
-
-                // Iterate over the words.
-                while let Some(word_row) = words.try_next().await.unwrap() { // TODO: error handling.
-                    let word_id: i64 = word_row.try_get("word_id").unwrap(); // TODO: error handling.
-                    let word_frequency: i64 = word_row.try_get("frequency").unwrap(); // TODO: error handling.
-                    let word_reviewed_count: i64 = word_row.try_get("reviewed").unwrap(); //TODO: error handling.
-
-                    // If this is the word we are currently reviewing or if we have reviewed it in the past (it's known)
-                    // Then don't add to our heuristic.
-                    if word_id != next_word_id || word_reviewed_count == 0 {
-                        heuristic += word_frequency;
-                    }
-                }
-
-                info!("Considering sentence with {} heuristic: {}", &heuristic, &sentence_text);
-
-                // Is this lower than our lowest heuristic so far
-                if heuristic < lowest_heuristic {
-                    lowest_heuristic = heuristic;
-                    fittest_sentence = Some(SentenceData {
-                        sentence_text,
-                        sentence_id,
-                        word_text: next_word.clone(),
-                        word_id: next_word_id
-                    })
-                }
-            }
-        }
-
-        match fittest_sentence {
-            Some(data) => { 
-                data
-            },
-            None => { 
-                SentenceData {
-                    sentence_id: 0,
-                    sentence_text: "No sentence to review".to_string(),
-                    word_text: "".to_string(),
-                    word_id: 0
-                }
-             }
-        }
-    }
-
     pub async fn get_review_info(&self) -> ReviewInfoData {
         // First bit of useful info is how many reviews there are for today.
         let end_of_day_time = self.get_end_of_day_time();
@@ -467,10 +350,9 @@ impl Knowledge {
         let review_count: i64 = sqlx::query("
             SELECT COUNT(*) FROM words
             WHERE reviewed > 0
-                AND datetime(next_review_at) < datetime(?) AND review_duration >= ?
+                AND datetime(next_review_at) < datetime(?) AND review_duration >= 86400
                 OR datetime(next_review_at) < datetime(?)")
             .bind(end_of_day_time.to_rfc3339())
-            .bind(60 * 60 * 24) // A day in seconds!
             .bind(now_time.to_rfc3339())
             .fetch_one(&self.connection).await.unwrap() // TODO: error handling.
             .try_get(0).unwrap();
@@ -482,46 +364,73 @@ impl Knowledge {
     }
 
     pub async fn review_word(&self, review_word_id: i64, response_quality: f64) {
+        // First bit of useful info is how many reviews there are for today.
+        let end_of_day_time = self.get_end_of_day_time();
+        let now_time = Local::now().fixed_offset();
+
         // Get data related to the supermemo algorithm from the database.
-        let word_row = sqlx::query("
-            SELECT id, text, repitition, e_factor, review_duration
+        match sqlx::query("
+            SELECT id, text, repitition, e_factor, review_duration, next_review_at, reviewed
             FROM words
-                WHERE id = ?")
+                WHERE id = ?
+                    AND (datetime(next_review_at) < datetime(?) AND review_duration >= 86400
+                        OR datetime(next_review_at) < datetime(?)
+                        OR reviewed = FALSE)")
             .bind(review_word_id)
-            .fetch_one(&self.connection).await.unwrap(); // TODO: error handling
+            .bind(end_of_day_time.to_rfc3339())
+            .bind(now_time.to_rfc3339())
+            .fetch_one(&self.connection).await {
 
-        let mut sm = SuperMemoItem {
-            repitition: word_row.try_get("repitition").unwrap(),
-            e_factor: word_row.try_get("e_factor").unwrap(),
-            duration: Duration::seconds(word_row.try_get("review_duration").unwrap())
-        };
+            Ok(word_row) => {
+                // We found the word and it is a word that needs reviewing, or is a new word, so review it.
+                
+                // If this is a new word, use the default supermemo item.
+                let reviewed: bool = word_row.try_get("reviewed").unwrap();
+                let mut sm = if !reviewed { 
+                    SuperMemoItem::default()
+                } else {
+                    SuperMemoItem {
+                        repitition: word_row.try_get("repitition").unwrap(),
+                        e_factor: word_row.try_get("e_factor").unwrap(),
+                        duration: Duration::seconds(word_row.try_get("review_duration").unwrap())
+                    }
+                };
 
-        // Calculate the values for the next review.
-        sm = super_memo_2(sm, response_quality);
-        let next_review_at = (Local::now().fixed_offset() + sm.duration).to_rfc3339();
+                // Calculate the values for the next review.
+                sm = super_memo_2(sm, response_quality);
+                let next_review_at = (Local::now().fixed_offset() + sm.duration).to_rfc3339();
+        
+                info!("Reviewing word id {}, updated review data: {:?}", review_word_id, &sm);
+        
+                // Store it.
+                {
+                    let mut tx = self.connection.begin().await.unwrap();
+                    sqlx::query("
+                        UPDATE words
+                        SET repitition = ?,
+                            e_factor = ?,
+                            review_duration = ?,
+                            next_review_at = ?,
+                            reviewed = TRUE
+                        WHERE 
+                            id = ?")
+                        .bind(sm.repitition)
+                        .bind(sm.e_factor)
+                        .bind(sm.duration.num_seconds())
+                        .bind(next_review_at)
+                        .bind(review_word_id)
+                        .execute(&mut *tx).await.unwrap(); // TODO: error handling
+        
+                    tx.commit().await.unwrap(); // TODO: error handling
+                }
 
-        info!("Reviewing word id {}, updated review data: {:?}", review_word_id, &sm);
-
-        // Store it.
-        {
-            let mut tx = self.connection.begin().await.unwrap();
-            sqlx::query("
-                UPDATE words
-                SET repitition = ?,
-                    e_factor = ?,
-                    review_duration = ?,
-                    next_review_at = ?,
-                    reviewed = TRUE
-                WHERE 
-                    id = ?")
-                .bind(sm.repitition)
-                .bind(sm.e_factor)
-                .bind(sm.duration.num_seconds())
-                .bind(next_review_at)
-                .bind(review_word_id)
-                .execute(&mut *tx).await.unwrap(); // TODO: error handling
-
-            tx.commit().await.unwrap(); // TODO: error handling
+            },
+            Err(e) => {
+                // There was an error (or there wasn't any word that matched.)
+                // This is hopefully because the word doesn't need reviewing yet.
+                // In this case we want to nothing other than log it.
+                info!("Word with id {} doesn't need reviewing yet!", review_word_id);
+            }
         }
     }
 

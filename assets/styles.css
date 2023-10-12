@@ -31,12 +31,16 @@ button {
     margin: 1rem;
 }
 
-#fail {
+#again {
     background-color:rgb(153, 12, 12);
 }
 
-#ok {
-    background-color:rgb(158, 172, 30)
+#hard {
+    background-color: rgb(216, 131, 34);
+}
+
+#good {
+    background-color: rgb(158, 172, 30);
 }
 
 #easy {
