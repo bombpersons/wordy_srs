@@ -16,6 +16,9 @@
     <button id="easy" class="review_button" data-difficulty="5.0">Easy</button>
 </div>
 
+<h4 id="words" class="center">Reviewing {{ words_being_reviewed.len() }} words: {% for word in words_being_reviewed %}{{ word }}, {% endfor %} </h4>
+<h4 id="words" class="center">{{ words_that_are_new.len() }} new words: {% for word in words_that_are_new %}{{ word }}, {% endfor %} </h4>
+
 <script src="https://ajax.googleapis.com/ajax/libs/jquery/2.1.3/jquery.min.js"></script>
 <script>
 $(document).ready(function() {

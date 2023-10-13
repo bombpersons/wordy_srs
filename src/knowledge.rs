@@ -129,7 +129,8 @@ pub struct SentenceData {
 pub struct IPlusOneSentenceData {
     pub sentence_text: String,
     pub sentence_id: i64,
-    pub words: Vec<(i64, String)>,
+    pub words_being_reviewed: Vec<(i64, String)>,
+    pub words_that_are_new: Vec<(i64, String)>
 }
 
 pub struct ReviewInfoData {
@@ -184,6 +185,52 @@ impl Knowledge {
             FROM word_sentence
                 INNER JOIN words ON words.id = word_id
             WHERE sentence_id = ?")
+            .bind(sentence_id)
+            .fetch(&self.connection);
+
+        let mut word_vec = Vec::new();
+        while let Some(word_row) = words.try_next().await.unwrap() { // TODO: error handling.
+            word_vec.push((word_row.try_get("word_id").unwrap(), word_row.try_get("word_text").unwrap()));
+        }
+
+        word_vec
+    }
+
+    async fn get_words_in_sentence_that_need_reviewing(&self, sentence_id: i64) -> Vec<(i64, String)> {
+        // First bit of useful info is how many reviews there are for today.
+        let end_of_day_time = self.get_end_of_day_time();
+        let now_time = Local::now().fixed_offset();
+
+        let mut words = sqlx::query("
+            SELECT word_id, sentence_id, words.text as word_text, words.next_review_at
+            FROM word_sentence
+                INNER JOIN words ON words.id = word_id
+            WHERE sentence_id = ?
+                AND (
+                    reviewed = TRUE
+                    AND datetime(next_review_at) < datetime(?) AND review_duration >= 86400
+                    OR datetime(next_review_at) < datetime(?)
+                )")
+            .bind(sentence_id)
+            .bind(end_of_day_time.to_rfc3339())
+            .bind(now_time.to_rfc3339())
+            .fetch(&self.connection);
+
+        let mut word_vec = Vec::new();
+        while let Some(word_row) = words.try_next().await.unwrap() { // TODO: error handling.
+            word_vec.push((word_row.try_get("word_id").unwrap(), word_row.try_get("word_text").unwrap()));
+        }
+
+        word_vec
+    }
+
+    async fn get_words_in_sentence_that_are_new(&self, sentence_id: i64) -> Vec<(i64, String)> {
+        let mut words = sqlx::query("
+            SELECT word_id, sentence_id, words.text as word_text, words.next_review_at
+            FROM word_sentence
+                INNER JOIN words ON words.id = word_id
+            WHERE sentence_id = ?
+                AND reviewed = FALSE")
             .bind(sentence_id)
             .fetch(&self.connection);
 
@@ -276,12 +323,14 @@ impl Knowledge {
             // If we review this sentence we'll be reviewing some of the words we need to review. Return it!
             let sentence_id = review_sentence_row.try_get("sentence_id").unwrap();
             let sentence_text = review_sentence_row.try_get("sentence_text").unwrap();
-            let words = self.get_words_in_sentence(sentence_id).await;
+            let words_being_reviewed = self.get_words_in_sentence_that_need_reviewing(sentence_id).await;
+            let words_that_are_new = self.get_words_in_sentence_that_are_new(sentence_id).await;
 
             return IPlusOneSentenceData {
                 sentence_id,
                 sentence_text,
-                words
+                words_being_reviewed,
+                words_that_are_new
             };
         }
 
@@ -315,12 +364,14 @@ impl Knowledge {
 
                 let sentence_id = row.try_get("sentence_id").unwrap();
                 let sentence_text = row.try_get("sentence_text").unwrap();
-                let words = self.get_words_in_sentence(sentence_id).await;
+                let words_being_reviewed = self.get_words_in_sentence_that_need_reviewing(sentence_id).await;
+                let words_that_are_new = self.get_words_in_sentence_that_are_new(sentence_id).await;
 
                 IPlusOneSentenceData {
                     sentence_id,
                     sentence_text,
-                    words
+                    words_being_reviewed,
+                    words_that_are_new
                 }
             },
 
@@ -328,7 +379,8 @@ impl Knowledge {
                 IPlusOneSentenceData {
                     sentence_id: 0,
                     sentence_text: "No sentence with any new words and no words are scheduled for reviewing.".to_string(),
-                    words: vec![(0, "".to_string())]
+                    words_being_reviewed: vec![(0, "".to_string())],
+                    words_that_are_new: vec![(0, "".to_string())]
                 }
             }
         }

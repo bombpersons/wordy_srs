@@ -48,7 +48,9 @@ async fn add_post(State(mut knowledge): State<Knowledge>,
 struct ReviewTemplate {
     sentence_id: i64,
     sentence: String,
-    reviews_today_count: i64
+    reviews_today_count: i64,
+    words_being_reviewed: Vec<String>,
+    words_that_are_new: Vec<String>
 }
 
 async fn review_get(State(knowledge): State<Knowledge>) -> ReviewTemplate {
@@ -58,7 +60,9 @@ async fn review_get(State(knowledge): State<Knowledge>) -> ReviewTemplate {
     ReviewTemplate {
         sentence_id: sentence_data.sentence_id,
         sentence: sentence_data.sentence_text,
-        reviews_today_count: review_info.reviews_remaining
+        reviews_today_count: review_info.reviews_remaining,
+        words_being_reviewed: sentence_data.words_being_reviewed.iter().map(|(_, text)| text.clone()).collect(),
+        words_that_are_new: sentence_data.words_that_are_new.iter().map(|(_, text)| text.clone()).collect()
     }
 }
 
@@ -90,9 +94,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         env::set_var("RUST_LOG", "info");
     }
     env_logger::init();
-
-    // track words that are out of learning over time!
-    // have a todo comment section so I can keep track of what I'm doing
 
     // Create the knowledge database.
     let knowledge = knowledge::Knowledge::new().await;
