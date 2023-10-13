@@ -91,6 +91,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     env_logger::init();
 
+    // track words that are out of learning over time!
+    // have a todo comment section so I can keep track of what I'm doing
+
     // Create the knowledge database.
     let knowledge = knowledge::Knowledge::new().await;
 

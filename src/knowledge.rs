@@ -249,7 +249,7 @@ impl Knowledge {
                 word_id, sentence_id, 
                 sentences.text AS sentence_text, sentences.id, 
                 words.next_review_at as review_at, words.reviewed AS reviewed, 
-                SUM(CASE WHEN datetime(words.next_review_at) < datetime(?) AND review_duration >= 86400 OR datetime(next_review_at) < datetime(?) THEN 1 ELSE 0 END) as words_that_need_reviewing,
+                SUM(CASE WHEN datetime(words.next_review_at) < datetime(?) AND review_duration >= 86400 OR datetime(words.next_review_at) < datetime(?) THEN 1 ELSE 0 END) as words_that_need_reviewing,
                 SUM(CASE WHEN words.reviewed = FALSE THEN 1 ELSE 0 END) as words_that_are_new
             FROM word_sentence
                 INNER JOIN sentences ON sentences.id = sentence_id
@@ -349,7 +349,7 @@ impl Knowledge {
 
         let review_count: i64 = sqlx::query("
             SELECT COUNT(*) FROM words
-            WHERE reviewed > 0
+            WHERE reviewed = TRUE
                 AND datetime(next_review_at) < datetime(?) AND review_duration >= 86400
                 OR datetime(next_review_at) < datetime(?)")
             .bind(end_of_day_time.to_rfc3339())
@@ -411,13 +411,15 @@ impl Knowledge {
                             e_factor = ?,
                             review_duration = ?,
                             next_review_at = ?,
-                            reviewed = TRUE
+                            reviewed = TRUE,
+                            date_first_reviewed = CASE WHEN date_first_reviewed IS NULL THEN ? ELSE date_first_reviewed END
                         WHERE 
                             id = ?")
                         .bind(sm.repitition)
                         .bind(sm.e_factor)
                         .bind(sm.duration.num_seconds())
                         .bind(next_review_at)
+                        .bind(now_time.to_rfc3339())
                         .bind(review_word_id)
                         .execute(&mut *tx).await.unwrap(); // TODO: error handling
         
@@ -437,6 +439,9 @@ impl Knowledge {
     async fn add_sentence(&self, sentence: &str) {
         info!("Adding sentence: {}", sentence);
 
+        // Get the current datetime
+        let now_time = Local::now().fixed_offset();
+
         // Tokenize the sentence to get the words.
         let tokens = self.tokenizer.tokenize(sentence).unwrap();
         let mut words = Vec::<String>::new();
@@ -452,10 +457,11 @@ impl Knowledge {
 
         // Insert the sentence to the sentences table.
         let sentence_id: Option<i64> = match sqlx::query(
-            "INSERT OR IGNORE INTO sentences(text)
-                    VALUES(?)
+            "INSERT OR IGNORE INTO sentences(text, date_added)
+                    VALUES(?, ?)
                     RETURNING id;")
                 .bind(sentence)
+                .bind(now_time.to_rfc3339())
                 .fetch_one(&mut *tx).await {
                     
                 Err(e) => None,
@@ -471,11 +477,12 @@ impl Knowledge {
 
                 // Insert into known words, or increment count if we already have it.
                 sqlx::query(
-                    r#"INSERT INTO words(count, frequency, text)
-                            VALUES(1, ?, ?)
+                    r#"INSERT INTO words(count, frequency, text, date_added)
+                            VALUES(1, ?, ?, ?)
                             ON CONFLICT(text) DO UPDATE SET count=count + 1;"#)
                         .bind(freq)
                         .bind(&word)
+                        .bind(now_time.to_rfc3339())
                         .execute(&mut *tx).await.expect("Error adding word!");
 
                 // Create the word->sentence relationship.
