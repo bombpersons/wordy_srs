@@ -129,6 +129,7 @@ pub struct SentenceData {
 pub struct IPlusOneSentenceData {
     pub sentence_text: String,
     pub sentence_id: i64,
+    pub sentence_source: String,
     pub words_being_reviewed: Vec<(i64, String)>,
     pub words_that_are_new: Vec<(i64, String)>
 }
@@ -294,7 +295,7 @@ impl Knowledge {
         let review_sentence_row = sqlx::query("
             SELECT 
                 word_id, sentence_id, 
-                sentences.text AS sentence_text, sentences.id, 
+                sentences.text AS sentence_text, sentences.id, sentences.source,
                 words.next_review_at as review_at, words.reviewed AS reviewed, 
                 SUM(CASE WHEN datetime(words.next_review_at) < datetime(?) AND review_duration >= 86400 OR datetime(words.next_review_at) < datetime(?) THEN 1 ELSE 0 END) as words_that_need_reviewing,
                 SUM(CASE WHEN words.reviewed = FALSE THEN 1 ELSE 0 END) as words_that_are_new
@@ -325,10 +326,12 @@ impl Knowledge {
             let sentence_text = review_sentence_row.try_get("sentence_text").unwrap();
             let words_being_reviewed = self.get_words_in_sentence_that_need_reviewing(sentence_id).await;
             let words_that_are_new = self.get_words_in_sentence_that_are_new(sentence_id).await;
+            let sentence_source = review_sentence_row.try_get("source").unwrap();
 
             return IPlusOneSentenceData {
                 sentence_id,
                 sentence_text,
+                sentence_source,
                 words_being_reviewed,
                 words_that_are_new
             };
@@ -339,7 +342,7 @@ impl Knowledge {
         match sqlx::query("
             SELECT 
                 word_id, sentence_id, 
-                sentences.text AS sentence_text, sentences.id, 
+                sentences.text AS sentence_text, sentences.id, sentences.source,
                 words.reviewed as word_reviewed, 
                 SUM(CASE WHEN words.reviewed = FALSE THEN 1 ELSE 0 END) as words_that_are_new,
                 AVG(CASE WHEN words.reviewed = FALSE THEN words.frequency ELSE NULL END) as average_new_word_frequency
@@ -366,19 +369,24 @@ impl Knowledge {
                 let sentence_text = row.try_get("sentence_text").unwrap();
                 let words_being_reviewed = self.get_words_in_sentence_that_need_reviewing(sentence_id).await;
                 let words_that_are_new = self.get_words_in_sentence_that_are_new(sentence_id).await;
+                let sentence_source = row.try_get("source").unwrap();
 
                 IPlusOneSentenceData {
                     sentence_id,
                     sentence_text,
+                    sentence_source,
                     words_being_reviewed,
                     words_that_are_new
                 }
             },
 
             Err(e) => {
+                log::error!("{}", e);
+
                 IPlusOneSentenceData {
                     sentence_id: 0,
                     sentence_text: "No sentence with any new words and no words are scheduled for reviewing.".to_string(),
+                    sentence_source: "".to_string(),
                     words_being_reviewed: vec![(0, "".to_string())],
                     words_that_are_new: vec![(0, "".to_string())]
                 }
@@ -488,8 +496,8 @@ impl Knowledge {
         }
     }
 
-    async fn add_sentence(&self, sentence: &str) {
-        info!("Adding sentence: {}", sentence);
+    async fn add_sentence(&self, sentence: &str, source: &str) {
+        info!("Adding sentence {} from source {}", sentence, source);
 
         // Get the current datetime
         let now_time = Local::now().fixed_offset();
@@ -509,11 +517,12 @@ impl Knowledge {
 
         // Insert the sentence to the sentences table.
         let sentence_id: Option<i64> = match sqlx::query(
-            "INSERT OR IGNORE INTO sentences(text, date_added)
-                    VALUES(?, ?)
+            "INSERT OR IGNORE INTO sentences(text, date_added, source)
+                    VALUES(?, ?, ?)
                     RETURNING id;")
                 .bind(sentence)
                 .bind(now_time.to_rfc3339())
+                .bind(source)
                 .fetch_one(&mut *tx).await {
                     
                 Err(e) => None,
@@ -559,11 +568,11 @@ impl Knowledge {
         tx.commit().await.unwrap(); // TODO: error handling
     }
 
-    pub async fn add_text(&self, text: &str) {
+    pub async fn add_text(&self, text: &str, source: &str) {
         let sentences = iterate_sentences(text);
         for sentence in sentences {
             // Split the sentence into words and add that to the database.
-            self.add_sentence(sentence.as_str()).await;
+            self.add_sentence(sentence.as_str(), source).await;
         }
     }
 }

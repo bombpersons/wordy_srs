@@ -32,13 +32,14 @@ async fn add_get(State(knowledge): State<Knowledge>) -> AddTemplate {
 
 #[derive(Deserialize)]
 struct AddTextQuery {
-    text: String
+    text: String,
+    source: String
 }
 
 async fn add_post(State(mut knowledge): State<Knowledge>,
-                  Form(AddTextQuery{ text }): Form<AddTextQuery>) -> &'static str 
+                  Form(AddTextQuery{ text, source }): Form<AddTextQuery>) -> &'static str 
 {
-    knowledge.add_text(text.as_str()).await;
+    knowledge.add_text(text.as_str(), source.as_str()).await;
 
     "Sentences added."
 }
@@ -48,6 +49,7 @@ async fn add_post(State(mut knowledge): State<Knowledge>,
 struct ReviewTemplate {
     sentence_id: i64,
     sentence: String,
+    sentence_source: String,
     reviews_today_count: i64,
     words_being_reviewed: Vec<String>,
     words_that_are_new: Vec<String>
@@ -60,6 +62,7 @@ async fn review_get(State(knowledge): State<Knowledge>) -> ReviewTemplate {
     ReviewTemplate {
         sentence_id: sentence_data.sentence_id,
         sentence: sentence_data.sentence_text,
+        sentence_source: sentence_data.sentence_source,
         reviews_today_count: review_info.reviews_remaining,
         words_being_reviewed: sentence_data.words_being_reviewed.iter().map(|(_, text)| text.clone()).collect(),
         words_that_are_new: sentence_data.words_that_are_new.iter().map(|(_, text)| text.clone()).collect()
