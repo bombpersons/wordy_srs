@@ -2,6 +2,8 @@
 
 {% block content %}
 
+<div id="review_content">
+
 {% if reviews_today_count > 0 -%}
 <h4 id="reviews" class="center reviews">{{ reviews_today_count }} words that need reviewing today</h4>
 {% else -%}
@@ -25,6 +27,8 @@
 </h4>
 <h4 id="words" class="center">Reviewing {{ words_being_reviewed.len() }} words: {% for word in words_being_reviewed %}{{ word }}, {% endfor %}</h4>
 <h4 id="words" class="center">{{ words_that_are_new.len() }} new words: {% for word in words_that_are_new %}{{ word }}, {% endfor %}</h4>
+
+</div>
 
 <script src="https://ajax.googleapis.com/ajax/libs/jquery/2.1.3/jquery.min.js"></script>
 <script>

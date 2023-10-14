@@ -1,9 +1,13 @@
 {% extends "base.html" %}
 
 {% block content %}
-<form action="/add" method="POST">
-    <label for="text">Sentences</label><textarea name="text" class="big_text_box" id="text" rows="15"></textarea><br/>
-    <label for="source">Source</label><textarea name="source" id="source" rows="1"></textarea><br/>
-    <button>add</button>
+<form action="/add" method="POST" id="add_form_container">
+    <label for="text">Sentences</label><textarea name="text" id="text"></textarea>
+
+    <div id="source_and_button_container">
+        <label for="source" id="source_label">Source</label>
+        <input name="source" id="source"></input>
+        <button>Add</button> 
+    </div>
 </form>
 {% endblock %}
