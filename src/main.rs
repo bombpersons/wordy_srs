@@ -13,15 +13,6 @@ mod knowledge;
 use knowledge::Knowledge;
 
 #[derive(Template)]
-#[template(path = "index.html")]
-struct IndexTemplate {
-}
-
-async fn index_get(State(knowledge): State<Knowledge>) -> IndexTemplate {
-    IndexTemplate { }
-}
-
-#[derive(Template)]
 #[template(path = "add.html")]
 struct AddTemplate {
 }
@@ -106,8 +97,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Create the routes.
     let app = Router::new()
-        .route("/", get(index_get))
-        .route("/review", get(review_get))
+        .route("/", get(review_get))
         .route("/review", post(review_post))
         .route("/add", get(add_get))
         .route("/add", post(add_post))

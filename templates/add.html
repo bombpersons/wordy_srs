@@ -2,8 +2,8 @@
 
 {% block content %}
 <form action="/add" method="POST">
-    <textarea name="text" id="text"></textarea>
-    <textarea name="source" id="source"></textarea>
+    <label for="text">Sentences</label><textarea name="text" class="big_text_box" id="text" rows="15"></textarea><br/>
+    <label for="source">Source</label><textarea name="source" id="source" rows="1"></textarea><br/>
     <button>add</button>
 </form>
 {% endblock %}

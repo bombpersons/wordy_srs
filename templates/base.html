@@ -8,6 +8,10 @@
         <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP&display=swap" rel="stylesheet">
     </head>
     <body>
+        <div class="center">
+            <button class="menu_button" onclick="window.location.href='/add';">Add</button>
+            <button class="menu_button" onclick="window.location.href='/';">Review</button>
+        </div>
         <div id="content">
             {% block content %}<h1>Content goes here!</h1>{% endblock %}
         </div>
