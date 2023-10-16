@@ -121,6 +121,11 @@ button {
     font-size: 15pt;
 }
 
+button:disabled {
+    color: #79826d;
+    background-color: rgb(14, 41, 18);
+}
+
 .review_button {
     background-color: #b36f16;
     font-size: 25pt;

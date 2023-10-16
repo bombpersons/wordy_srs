@@ -16,6 +16,9 @@
 <script>
     $(document).ready(function() {
         $('#add_button').on('click', function() {
+            // Disable the button until our request returns.
+            $(this).attr('disabled', true);
+
             $.ajax({
                 url: '/add',
                 type: 'POST',
@@ -34,6 +37,9 @@
                     .text(`${sentences_added} sentences added successfully!`);
 
                 $('#text').val("");
+
+                // Re-enable the button
+                $('#add_button').attr('disabled', false);
             }).catch(function(err) {
                 $('#status')
                     .removeClass('success_status')
@@ -41,6 +47,9 @@
                     .text(err);
 
                 console.error(err);
+
+                // Re-enable the button
+                $('#add_button').attr('disabled', false);
             });
         });
     });
