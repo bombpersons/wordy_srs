@@ -43,7 +43,7 @@ body {
     display: flex;
     flex-direction: row;
     justify-content: center;
-    padding: 1rem;
+    padding: 1rem 0;
 }
 
 #add_form_container #source_and_button_container #source_container {
@@ -54,12 +54,21 @@ body {
     padding: 1rem;
 }
 
-#add_form_container #source_and_button_container label {
-    padding: 1rem;
-}
-
 #add_form_container #source_and_button_container #source {
     flex-grow: 1;
+}
+
+#add_form_container #status {
+    text-align: center;
+    font-size: 25pt;
+}
+
+#add_form_container .error_status {
+    color: red;
+}
+
+#add_form_container .success_status {
+    color: green;
 }
 
 textarea {

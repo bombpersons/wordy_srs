@@ -27,12 +27,21 @@ struct AddTextQuery {
     source: String
 }
 
-async fn add_post(State(mut knowledge): State<Knowledge>,
-                  Form(AddTextQuery{ text, source }): Form<AddTextQuery>) -> &'static str 
-{
-    knowledge.add_text(text.as_str(), source.as_str()).await;
+#[derive(Serialize)]
+struct AddTextResponse {
+    success: bool,
+    sentences_added: i64
+}
 
-    "Sentences added."
+async fn add_post(State(mut knowledge): State<Knowledge>,
+                  Json(AddTextQuery{ text, source }): Json<AddTextQuery>) -> Json<AddTextResponse>
+{
+    let sentences_added = knowledge.add_text(text.as_str(), source.as_str()).await;
+
+    Json(AddTextResponse {
+        success: true,
+        sentences_added
+    })
 }
 
 #[derive(Template)]

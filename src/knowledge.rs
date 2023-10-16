@@ -568,11 +568,14 @@ impl Knowledge {
         tx.commit().await.unwrap(); // TODO: error handling
     }
 
-    pub async fn add_text(&self, text: &str, source: &str) {
+    pub async fn add_text(&self, text: &str, source: &str) -> i64 {
         let sentences = iterate_sentences(text);
+        let sentences_count = sentences.len();
         for sentence in sentences {
             // Split the sentence into words and add that to the database.
             self.add_sentence(sentence.as_str(), source).await;
         }
+
+        sentences_count as i64
     }
 }

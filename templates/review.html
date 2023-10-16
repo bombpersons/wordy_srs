@@ -4,61 +4,58 @@
 
 <div id="review_content">
 
-{% if reviews_today_count > 0 -%}
-<h4 id="reviews" class="center reviews">{{ reviews_today_count }} words that need reviewing today</h4>
-{% else -%}
-<h4 id="new_word_warning" class="center">Reviews are finished for today. All further reviews will only be adding new words!</h4>
-{% endif -%}
+    {% if reviews_today_count > 0 -%}
+    <h4 id="reviews" class="center reviews">{{ reviews_today_count }} words that need reviewing today</h4>
+    {% else -%}
+    <h4 id="new_word_warning" class="center">Reviews are finished for today. All further reviews will only be adding new words!</h4>
+    {% endif -%}
 
-<h1 id="sentence" class="center sentence" data-sentence_id="{{ sentence_id }}">{{ sentence }}</h1>
-<div class="center">
-    <button id="again" class="review_button" data-difficulty="2.0">Again</button>
-    <button id="hard" class="review_button" data-difficulty="3.0">Hard</button>
-    <button id="good" class="review_button" data-difficulty="4.0">Good</button>
-    <button id="easy" class="review_button" data-difficulty="5.0">Easy</button>
+    <h1 id="sentence" class="center sentence" data-sentence_id="{{ sentence_id }}">{{ sentence }}</h1>
+    <div class="center">
+        <button id="again" class="review_button" data-difficulty="2.0">Again</button>
+        <button id="hard" class="review_button" data-difficulty="3.0">Hard</button>
+        <button id="good" class="review_button" data-difficulty="4.0">Good</button>
+        <button id="easy" class="review_button" data-difficulty="5.0">Easy</button>
+    </div>
+
+    <h4 class="center">Source: 
+    {% if sentence_source == "" %}
+        Unknown
+    {% else %}
+        {{ sentence_source }}
+    {% endif %}
+    </h4>
+    <h4 id="words" class="center">Reviewing {{ words_being_reviewed.len() }} words: {% for word in words_being_reviewed %}{{ word }}, {% endfor %}</h4>
+    <h4 id="words" class="center">{{ words_that_are_new.len() }} new words: {% for word in words_that_are_new %}{{ word }}, {% endfor %}</h4>
+
 </div>
 
-<h4 class="center">Source: 
-{% if sentence_source == "" %}
-    Unknown
-{% else %}
-    {{ sentence_source }}
-{% endif %}
-</h4>
-<h4 id="words" class="center">Reviewing {{ words_being_reviewed.len() }} words: {% for word in words_being_reviewed %}{{ word }}, {% endfor %}</h4>
-<h4 id="words" class="center">{{ words_that_are_new.len() }} new words: {% for word in words_that_are_new %}{{ word }}, {% endfor %}</h4>
-
-</div>
-
-<script src="https://ajax.googleapis.com/ajax/libs/jquery/2.1.3/jquery.min.js"></script>
 <script>
-$(document).ready(function() {
-    var review_func = function(response_quality) {
-        $.ajax({
-            url: '/review',
-            type: 'POST',
-            dataType: 'json',
-            contentType: 'application/json',
-            data: JSON.stringify({
-                review_sentence_id: $("#sentence").data("sentence_id"),
-                response_quality: response_quality
-            }),
-            success: function(result) {
+    $(document).ready(function() {
+        var review_func = function(response_quality) {
+            $.ajax({
+                url: '/review',
+                type: 'POST',
+                dataType: 'json',
+                contentType: 'application/json',
+                data: JSON.stringify({
+                    review_sentence_id: $("#sentence").data("sentence_id"),
+                    response_quality: response_quality
+                })
+            }).then(function(data) {
                 console.log(result);
 
                 // Reload the page to get the next sentence.
                 location.reload();
-            },
-            error: function(xhr, resp, text) {
-                console.error(xhr, resp, text);
-            }
-        });
-    }
+            }).catch(function(err) {
+                console.error(err);
+            });
+        }
 
-    $(".review_button").on('click', function() {
-        console.log("HEY");
-        review_func(parseFloat($(this).data("difficulty")));
+        $(".review_button").on('click', function() {
+            console.log("HEY");
+            review_func(parseFloat($(this).data("difficulty")));
+        });
     });
-});
 </script>
 {% endblock %}

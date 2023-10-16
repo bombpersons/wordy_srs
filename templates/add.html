@@ -1,13 +1,48 @@
 {% extends "base.html" %}
 
 {% block content %}
-<form action="/add" method="POST" id="add_form_container">
-    <label for="text">Sentences</label><textarea name="text" id="text"></textarea>
+<div id="add_form_container">
+    <label for="text" class="centered">Sentences</label><textarea name="text" id="text"></textarea>
 
     <div id="source_and_button_container">
         <label for="source" id="source_label">Source</label>
         <input name="source" id="source"></input>
-        <button>Add</button> 
+        <button id="add_button">Add</button> 
     </div>
-</form>
+
+    <h4 id="status" class="status">Status</h4>
+</div>
+
+<script>
+    $(document).ready(function() {
+        $('#add_button').on('click', function() {
+            $.ajax({
+                url: '/add',
+                type: 'POST',
+                dataType: 'json',
+                contentType: 'application/json',
+                data: JSON.stringify({
+                    text: $("#text").val(),
+                    source: $("#source").val()
+                })
+            }).then(function(data) {
+                var sentences_added = data.sentences_added;
+
+                $('#status')
+                    .removeClass('error_status')
+                    .addClass('success_status')
+                    .text(`${sentences_added} sentences added successfully!`);
+
+                $('#text').val("");
+            }).catch(function(err) {
+                $('#status')
+                    .removeClass('success_status')
+                    .addClass('error_status')
+                    .text(err);
+
+                console.error(err);
+            });
+        });
+    });
+</script>
 {% endblock %}
