@@ -345,7 +345,7 @@ impl Knowledge {
                 sentences.text AS sentence_text, sentences.id, sentences.source,
                 words.reviewed as word_reviewed, 
                 SUM(CASE WHEN words.reviewed = FALSE THEN 1 ELSE 0 END) as words_that_are_new,
-                AVG(CASE WHEN words.reviewed = FALSE THEN words.frequency ELSE NULL END) as average_new_word_frequency
+                AVG(CASE WHEN words.reviewed = FALSE THEN words.count ELSE NULL END) as average_new_word_count
             FROM word_sentence
                 INNER JOIN sentences ON sentences.id = sentence_id
                 INNER JOIN words ON words.id = word_id
@@ -354,16 +354,16 @@ impl Knowledge {
             HAVING
                 words_that_are_new > 0
             ORDER by
-            words_that_are_new ASC,
-                average_new_word_frequency ASC
+                words_that_are_new ASC,
+                average_new_word_count DESC
             LIMIT 1")
             .fetch_one(&self.connection)
             .await {
 
             Ok(row) => {
                 let words_that_are_new: i64 = row.try_get("words_that_are_new").unwrap();
-                let averag_word_freq: f64 = row.try_get("average_new_word_frequency").unwrap();
-                info!("Found a sentence with {} new words with an average {} word frequency", words_that_are_new, averag_word_freq);
+                let averag_word_count: f64 = row.try_get("average_new_word_count").unwrap();
+                info!("Found a sentence with {} new words with an average {} word count", words_that_are_new, averag_word_count);
 
                 let sentence_id = row.try_get("sentence_id").unwrap();
                 let sentence_text = row.try_get("sentence_text").unwrap();
