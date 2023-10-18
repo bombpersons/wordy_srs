@@ -291,7 +291,13 @@ impl Knowledge {
         info!("Attempting to find a sentence to review...");
 
         // First we need to find sentences that are most optimal to meet the criteria of reviewing words that are expired.
-        // Treat a word as needing reviewing if it TODO: explain
+        // So use a SUM and sub statement to sum the words that actually need reviewing today.
+        // Find a the number of words that haven't been reviewed at all (new words).
+        // And sort all of these sentences by (words that need reviewing - words that are new).
+        // This prevents us getting sentences that have loads and loads of words that need reviewing, but also
+        // loads of words that are new (if you have some really long sentences in your database for example.)
+        // This statement still picks some really long sentences sometimes, but at least it will only do that
+        // if you actually know most of the words in it.
         let review_sentence_row = sqlx::query("
             SELECT 
                 word_id, sentence_id, 
@@ -305,8 +311,7 @@ impl Knowledge {
             GROUP BY
                 sentence_id
             ORDER BY
-                words_that_need_reviewing DESC,
-                words_that_are_new ASC
+                (words_that_need_reviewing - words_that_are_new) DESC
             LIMIT 1
             ")
             .bind(end_of_day_time.to_rfc3339())
