@@ -1,7 +1,7 @@
-use std::{collections::{HashSet, HashMap}, str::FromStr, future::Future};
+use std::{collections::{HashSet, HashMap}, str::FromStr, future::Future, process::{Command, Stdio}, io::{Write}, string};
 
 use log::info;
-use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, ConnectOptions, SqliteConnection, Pool, Sqlite, Row};
+use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow}, ConnectOptions, SqliteConnection, Pool, Sqlite, Row, Transaction, Executor, SqliteExecutor};
 use lindera::tokenizer::Tokenizer;
 use chrono::{Utc, Duration, FixedOffset, Local, Timelike, format::Fixed, DateTime};
 use futures::TryStreamExt;
@@ -90,8 +90,8 @@ impl WordFrequencyList {
 // Try and split up a text into sentences.
 fn iterate_sentences(text: &str) -> Vec<String> {
     let terminators: HashSet<char> = HashSet::from(['。', '\n', '！', '？']);
-    let open_quotes: HashSet<char> = HashSet::from(['「']);
-    let close_quotes: HashSet<char> = HashSet::from(['」']);
+    let open_quotes: HashSet<char> = HashSet::from(['「', '『']);
+    let close_quotes: HashSet<char> = HashSet::from(['」', '』']);
 
     let mut depth: i32 = 0;
     let mut curr_string: String = String::new();
@@ -164,6 +164,125 @@ impl Knowledge {
             word_freq: WordFrequencyList::new(),
             connection
         }
+    }
+
+    fn tokenize_sentence_lindera(&self, sentence: &str) -> Vec<String> {
+        let tokens = self.tokenizer.tokenize(sentence).unwrap();
+        let mut words = Vec::<String>::new();
+        for token in tokens {
+            if token.detail.len() > 7 {
+                let base_form = &token.detail[6];
+                words.push(base_form.to_string());
+            }
+        }
+    
+        words
+    }
+
+    fn tokenize_sentence_jumanpp(&self, sentence: &str) -> Vec<String> {
+        let mut jumanpp = Command::new("C:/jumanpp/jumanpp.bat") // TEMP!!
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn().unwrap(); // TODO: Erro handling!
+
+        if let Some(stdin) = jumanpp.stdin.as_mut().take() {
+            stdin.write_all(sentence.as_bytes()).unwrap(); // TODO: error handling!
+        } 
+
+        match jumanpp.wait_with_output() {
+            Ok(output) => {
+                let data = String::from_utf8(output.stdout).unwrap(); // TODO: handle errors
+                let mut words = Vec::new();
+
+                // Parse the output and find the de-conjugated words.
+                // Each line is a word (in order).
+                // https://github.com/ku-nlp/jumanpp/blob/master/docs/output.md 
+                // The third entry on each line is the dictionary form. That's what we want.
+                // If a line start's with a '@' then that is an alias and we should maybe ignore
+                // that and only take one version of the word.
+                if output.status.success() {
+                    for line in data.lines() {
+                        // Ignore lines that start with '@'
+                        if line.starts_with('@') {
+                            continue;
+                        }
+
+                        // Split the line by spaces
+                        let parts: Vec<&str> = line.split(" ").collect();
+
+                        // Not exactly the best way to do this, but...
+                        // There *should* be 12 space-separated fields, so expect that:
+                        // Note: (this is <= 12 because the last field can sometimes be a quoted string that can contain spaces
+                        // rather than actually parse this, bodge it by just expecting at least 12 fields. We aren't interested
+                        // in the last fields anyway, so it's probably fine.) It might be a good idea to look
+                        // at doing this properly at some point though. Maybe when I go through and sort out all of the error handling.
+                        if parts.len() >= 12 {
+                            let deconjugated = parts[2];
+
+                            // Okay, so for some reason '\␣' is used to refer to a space.
+                            // We uh don't want to include these.
+                            if deconjugated == r"\␣" {
+                                continue;
+                            }
+
+                            words.push(deconjugated.to_string());
+                        }
+                    }
+                }
+
+                words
+            },
+            Err(e) => {
+                // There was an error, maybe something wrong with the sentence, jumanpp wasn't installed.
+                log::error!("Error calling jumanpp: {}", e);
+                panic!(); // Just panic for now >.<
+            }
+        }
+    } 
+
+    pub async fn retokenize(&mut self) -> () {
+        log::info!("Retokenizing sentences...");
+
+        // First open a transaction.
+        let mut tx = self.connection.begin().await.unwrap();
+
+        // Now clear out the word_sentence table.
+        sqlx::query("DELETE FROM word_sentence")
+            .execute(&mut *tx).await.unwrap(); // TODO: handle errors
+
+        // Set the word tables count to 0 for everything
+        sqlx::query("UPDATE words SET count = 0")
+            .execute(&mut *tx).await.unwrap(); // TODO: handle errors
+
+        // Now go through each sentence and re-tokenize it
+        let mut sentences_to_process = Vec::new();
+        {
+            let mut sentences_stream = sqlx::query("SELECT id, text, source FROM sentences")
+                .fetch(&mut *tx);
+
+            while let Some(row) = sentences_stream.try_next().await.unwrap() { // TODO: error handling
+                let sentence: String = row.try_get("text").unwrap();
+                let source: String = row.try_get("source").unwrap();
+                let id: i64 = row.try_get("id").unwrap();
+
+                sentences_to_process.push((id, sentence));
+            }
+        }
+
+        // Now the stream is closed...
+        for (id, text) in sentences_to_process {
+            // Tokenize
+            let words = self.tokenize_sentence_jumanpp(text.as_str());
+
+            // Re-add the sentences
+            self.add_words_to_sentence(id, words, &mut *tx).await;
+        }
+
+        tx.commit().await.unwrap(); // TODO: handle errors
+
+        log::info!("Finished re-tokenizing");
+
+        // Done!
     }
 
     fn get_end_of_day_time(&self) -> DateTime<FixedOffset> {
@@ -293,12 +412,9 @@ impl Knowledge {
         // First we need to find sentences that are most optimal to meet the criteria of reviewing words that are expired.
         // So use a SUM and sub statement to sum the words that actually need reviewing today.
         // Find a the number of words that haven't been reviewed at all (new words).
-        // And sort all of these sentences by (words that need reviewing - words that are new).
-        // This prevents us getting sentences that have loads and loads of words that need reviewing, but also
-        // loads of words that are new (if you have some really long sentences in your database for example.)
-        // This statement still picks some really long sentences sometimes, but at least it will only do that
-        // if you actually know most of the words in it.
-        let review_sentence_row = sqlx::query("
+        // Ignore any sentences with new words.
+        // TODO: Maybe try and pick a random sentence that has the same amount of words that need reviewing? 
+        match sqlx::query("
             SELECT 
                 word_id, sentence_id, 
                 sentences.text AS sentence_text, sentences.id, sentences.source,
@@ -310,37 +426,52 @@ impl Knowledge {
                 INNER JOIN words ON words.id = word_id
             GROUP BY
                 sentence_id
+            HAVING
+                words_that_are_new = 0
             ORDER BY
-                (words_that_need_reviewing - words_that_are_new) DESC
+                words_that_need_reviewing DESC,
+                words_that_are_new ASC,
+                random()
             LIMIT 1
             ")
             .bind(end_of_day_time.to_rfc3339())
             .bind(now_time.to_rfc3339())
             .fetch_one(&self.connection)
-            .await.unwrap(); // TODO: error handling.
+            .await {
+                
+            Ok(row) => {
+                // If there are no words that need reviewing in the selected sentence then we don't have any sentences to review!
+                let words_that_need_reviewing: i64 = row.try_get("words_that_need_reviewing").unwrap();
+                let words_that_are_new: i64 = row.try_get("words_that_are_new").unwrap();
+                let sentence_text: String = row.try_get("sentence_text").unwrap();
+                info!("Found a sentence with {} words that need reviewing and {} new words. Sentence: {}", words_that_need_reviewing, words_that_are_new, sentence_text);
 
-        // If there are no words that need reviewing in the selected sentence then we don't have any sentences to review!
-        let words_that_need_reviewing: i64 = review_sentence_row.try_get("words_that_need_reviewing").unwrap();
-        let words_that_are_new: i64 = review_sentence_row.try_get("words_that_are_new").unwrap();
-        info!("Found a sentence with {} words that need reviewing and {} new words.", words_that_need_reviewing, words_that_are_new);
+                // If there are words that need reviewing, do that!
+                if words_that_need_reviewing > 0 {
+                    // If we review this sentence we'll be reviewing some of the words we need to review. Return it!
+                    let sentence_id = row.try_get("sentence_id").unwrap();
+                    let sentence_text = row.try_get("sentence_text").unwrap();
+                    let words_being_reviewed = self.get_words_in_sentence_that_need_reviewing(sentence_id).await;
+                    let words_that_are_new = self.get_words_in_sentence_that_are_new(sentence_id).await;
+                    let sentence_source = row.try_get("source").unwrap();
 
-        // If there are words that need reviewing, do that!
-        if words_that_need_reviewing > 0 {
-            // If we review this sentence we'll be reviewing some of the words we need to review. Return it!
-            let sentence_id = review_sentence_row.try_get("sentence_id").unwrap();
-            let sentence_text = review_sentence_row.try_get("sentence_text").unwrap();
-            let words_being_reviewed = self.get_words_in_sentence_that_need_reviewing(sentence_id).await;
-            let words_that_are_new = self.get_words_in_sentence_that_are_new(sentence_id).await;
-            let sentence_source = review_sentence_row.try_get("source").unwrap();
-
-            return IPlusOneSentenceData {
-                sentence_id,
-                sentence_text,
-                sentence_source,
-                words_being_reviewed,
-                words_that_are_new
-            };
-        }
+                    return IPlusOneSentenceData {
+                        sentence_id,
+                        sentence_text,
+                        sentence_source,
+                        words_being_reviewed,
+                        words_that_are_new
+                    };
+                }
+            },
+            Err(sqlx::Error::RowNotFound) => {
+                // This ok, there might not be any sentences that have 0 new words.
+                // Just continue and try the next query for new sentences and words.
+            },
+            Err(e) => {
+                panic!();
+            }
+        };
 
         // Okay so there aren't any sentences that contain words that we need to review. 
         // Let's look for sentences that contain the least amount of new information so that we can learn new words.
@@ -360,7 +491,8 @@ impl Knowledge {
                 words_that_are_new > 0
             ORDER by
                 words_that_are_new ASC,
-                average_new_word_count DESC
+                average_new_word_count DESC,
+                random()
             LIMIT 1")
             .fetch_one(&self.connection)
             .await {
@@ -501,21 +633,15 @@ impl Knowledge {
         }
     }
 
-    async fn add_sentence(&self, sentence: &str, source: &str) {
+    async fn add_sentence(&mut self, sentence: &str, source: &str) {
         info!("Adding sentence {} from source {}", sentence, source);
 
         // Get the current datetime
         let now_time = Local::now().fixed_offset();
 
         // Tokenize the sentence to get the words.
-        let tokens = self.tokenizer.tokenize(sentence).unwrap();
-        let mut words = Vec::<String>::new();
-        for token in tokens {
-            if token.detail.len() > 7 {
-                let base_form = &token.detail[6];
-                words.push(base_form.to_string());
-            }
-        }
+        let words = self.tokenize_sentence_jumanpp(sentence);
+        log::info!("Contains words: {:?}", words);
 
         // Start a database transaction.
         let mut tx = self.connection.begin().await.unwrap(); // TODO: error handling
@@ -537,43 +663,51 @@ impl Knowledge {
         // If the sentence already existed, then we haven't done anything and we don't have a new sentence id.
         // The words will have already been inserted the first time we added the sentence.
         if let Some(sentence_id) = sentence_id  {
-            // Let's go over the words.
-            for word in words {
-                let freq = self.word_freq.get_word_freq(&word);
-
-                // Insert into known words, or increment count if we already have it.
-                sqlx::query(
-                    r#"INSERT INTO words(count, frequency, text, date_added)
-                            VALUES(1, ?, ?, ?)
-                            ON CONFLICT(text) DO UPDATE SET count=count + 1;"#)
-                        .bind(freq)
-                        .bind(&word)
-                        .bind(now_time.to_rfc3339())
-                        .execute(&mut *tx).await.expect("Error adding word!");
-
-                // Create the word->sentence relationship.
-                let word_id: i64 = sqlx::query(
-                    r#"SELECT id, text
-                            FROM words
-                            WHERE text = ?"#)
-                    .bind(&word)
-                    .fetch_one(&mut *tx).await.expect("Couldn't find word in database!")
-                    .try_get("id").expect("No id in word table");
-
-                sqlx::query(
-                    r#"INSERT OR IGNORE INTO word_sentence(word_id, sentence_id)
-                            VALUES(?, ?);"#)
-                    .bind(word_id)
-                    .bind(sentence_id)
-                    .execute(&mut *tx).await.expect("Couldn't add word->sentence relationship.");
-            }
+            self.add_words_to_sentence(sentence_id, words, &mut tx).await;
         }
 
         // Commit to the transaction.
         tx.commit().await.unwrap(); // TODO: error handling
     }
 
-    pub async fn add_text(&self, text: &str, source: &str) -> i64 {
+    async fn add_words_to_sentence(&mut self, id: i64, words: Vec<String>, tx: &mut SqliteConnection) {
+        let now_time = Local::now().fixed_offset();
+
+        log::info!("Adding words {:?}", words);
+
+        // Let's go over the words.
+        for word in &words {
+            let freq = self.word_freq.get_word_freq(&word);
+
+            // Insert into known words, or increment count if we already have it.
+            sqlx::query(
+                    "INSERT INTO words(count, frequency, text, date_added)
+                        VALUES(1, ?, ?, ?)
+                        ON CONFLICT(text) DO UPDATE SET count=count + 1;")
+                    .bind(freq)
+                    .bind(&word)
+                    .bind(now_time.to_rfc3339())
+                    .execute(&mut *tx).await.expect("Error adding word!");
+
+            // Create the word->sentence relationship.
+            let word_id: i64 = sqlx::query(
+                    "SELECT id, text
+                        FROM words
+                        WHERE text = ?")
+                .bind(&word)
+                .fetch_one(&mut *tx).await.expect("Couldn't find word in database!")
+                .try_get("id").expect("No id in word table");
+
+            sqlx::query(
+                    "INSERT OR IGNORE INTO word_sentence(word_id, sentence_id)
+                        VALUES(?, ?);")
+                .bind(word_id)
+                .bind(id)
+                .execute(&mut *tx).await.expect("Couldn't add word->sentence relationship.");
+        }
+    }
+
+    pub async fn add_text(&mut self, text: &str, source: &str) -> i64 {
         let sentences = iterate_sentences(text);
         let sentences_count = sentences.len();
         for sentence in sentences {

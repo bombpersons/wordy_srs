@@ -6,11 +6,42 @@ use axum::{
     routing::{get, post},
     Router, extract::{State, Query}, Form, Json,
 };
+use axum::http::{Uri, header, StatusCode};
+use axum::response::{Response, IntoResponse};
+
 use log::{info, error};
 use tower_http::services::ServeDir;
+use rust_embed::RustEmbed;
+
+use clap::Parser;
 
 mod knowledge;
 use knowledge::Knowledge;
+
+pub static STATIC_ASSETS_PATH: &str = concat!("/assets_", env!("CARGO_PKG_VERSION"));
+
+// Embed our assets
+#[derive(RustEmbed)]
+#[folder = "assets"]
+struct Asset;
+
+pub fn asset_routes() -> Router {
+    Router::new().fallback(asset_handler)
+}
+
+async fn asset_handler(uri: Uri) -> Response {
+    let path = uri.path()
+        .trim_start_matches(STATIC_ASSETS_PATH)
+        .trim_start_matches('/');
+
+    if let Some(content) = Asset::get(path) {
+        let mime = mime_guess::from_path(path).first_or_octet_stream();
+        ([(header::CONTENT_TYPE, mime.as_ref())], content.data).into_response()
+    }
+    else {
+        (StatusCode::NOT_FOUND, "404 Not Found").into_response()
+    }
+}
 
 #[derive(Template)]
 #[template(path = "add.html")]
@@ -90,6 +121,14 @@ async fn review_post(State(knowledge): State<Knowledge>,
     })
 }
 
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    // Whether or not to re-tokenize sentences.
+    #[arg(short, long)]
+    retokenize: bool
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // Set RUST_LOG to info by default for other peoples' convenience.
@@ -98,11 +137,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     env_logger::init();
 
-    // Create the knowledge database.
-    let knowledge = knowledge::Knowledge::new().await;
+    // Parse command line arguments
+    let args = Args::parse();
 
-    // A service serving static assets.
-    let static_assets_serve = ServeDir::new("assets");
+    // Create the knowledge database.
+    let mut knowledge = knowledge::Knowledge::new().await;
+
+    // Retokenize our db if specified.
+    if args.retokenize {
+        knowledge.retokenize().await
+    }
 
     // Create the routes.
     let app = Router::new()
@@ -110,7 +154,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .route("/review", post(review_post))
         .route("/add", get(add_get))
         .route("/add", post(add_post))
-        .nest_service("/assets", static_assets_serve)
+        .nest_service("/assets", asset_routes())
         .with_state(knowledge);
 
     // Start the server.

@@ -18,3 +18,6 @@ lindera = "0.14.0"
 chrono = "0.4.31"
 futures = "0.3.28"
 tower-http = { version = "0.4.4", features = ["fs"] }
+rust-embed = { version = "8.0.0", features = ["axum"] }
+mime_guess = "2.0.4"
+clap = { version = "4.4.6", features = ["derive"] }
