@@ -1,10 +1,10 @@
-use std::{net::SocketAddr, error::Error, sync::Arc, env};
+use std::{net::SocketAddr, error::Error, sync::Arc, env, fmt::Display};
 use serde::{Deserialize, Serialize};
 
 use askama::Template;
 use axum::{
     routing::{get, post},
-    Router, extract::{State, Query}, Form, Json,
+    Router, extract::{State, Query}, Form, Json, response::IntoResponseParts,
 };
 use axum::http::{Uri, header, StatusCode};
 use axum::response::{Response, IntoResponse};
@@ -20,6 +20,68 @@ use knowledge::Knowledge;
 
 pub static STATIC_ASSETS_PATH: &str = concat!("/assets_", env!("CARGO_PKG_VERSION"));
 
+// An error template
+#[derive(Template)]
+#[template(path = "error.html")]
+struct ErrorTemplate {
+    status: StatusCode,
+    text: String
+}
+
+// Error type for our contorller
+#[derive(Debug)]
+pub enum ControllerError {
+    KnowledgeError(knowledge::KnowledgeError),
+    NotFound
+}
+
+impl From<knowledge::KnowledgeError> for ControllerError {
+    fn from(value: knowledge::KnowledgeError) -> Self {
+        Self::KnowledgeError(value)
+    }
+}
+
+impl Display for ControllerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::KnowledgeError(e) => write!(f, "Error accessing knowledge: {}", e),
+            Self::NotFound => write!(f, "Not Found")
+        }
+    }
+}
+
+impl std::error::Error for ControllerError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::KnowledgeError(e) => Some(e),
+            Self::NotFound => None
+        }
+    }
+}
+
+impl IntoResponse for ControllerError {
+    fn into_response(self) -> Response {
+        match &self {
+            Self::KnowledgeError(e) => {
+                (StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorTemplate {
+                    status: StatusCode::INTERNAL_SERVER_ERROR,
+                    text: format!("{}", self).to_string()
+                }).into_response()
+            },
+            Self::NotFound => {
+                (StatusCode::NOT_FOUND,
+                ErrorTemplate {
+                    status: StatusCode::NOT_FOUND,
+                    text: format!("{}", self).to_string()
+                }).into_response()
+            }
+        }
+    }
+}
+
+pub type ControllerResult<T> = Result<T, ControllerError>;
+
 // Embed our assets
 #[derive(RustEmbed)]
 #[folder = "assets"]
@@ -29,17 +91,17 @@ pub fn asset_routes() -> Router {
     Router::new().fallback(asset_handler)
 }
 
-async fn asset_handler(uri: Uri) -> Response {
+async fn asset_handler(uri: Uri) -> ControllerResult<Response> {
     let path = uri.path()
         .trim_start_matches(STATIC_ASSETS_PATH)
         .trim_start_matches('/');
 
     if let Some(content) = Asset::get(path) {
         let mime = mime_guess::from_path(path).first_or_octet_stream();
-        ([(header::CONTENT_TYPE, mime.as_ref())], content.data).into_response()
+        Ok(([(header::CONTENT_TYPE, mime.as_ref())], content.data).into_response())
     }
     else {
-        (StatusCode::NOT_FOUND, "404 Not Found").into_response()
+        Err(ControllerError::NotFound)
     }
 }
 
@@ -48,8 +110,8 @@ async fn asset_handler(uri: Uri) -> Response {
 struct AddTemplate {
 }
 
-async fn add_get(State(knowledge): State<Knowledge>) -> AddTemplate {
-    AddTemplate { }
+async fn add_get(State(knowledge): State<Knowledge>) -> ControllerResult<AddTemplate> {
+    Ok(AddTemplate { })
 }
 
 #[derive(Deserialize)]
@@ -65,14 +127,14 @@ struct AddTextResponse {
 }
 
 async fn add_post(State(mut knowledge): State<Knowledge>,
-                  Json(AddTextQuery{ text, source }): Json<AddTextQuery>) -> Json<AddTextResponse>
+                  Json(AddTextQuery{ text, source }): Json<AddTextQuery>) -> ControllerResult<Json<AddTextResponse>>
 {
-    let sentences_added = knowledge.add_text(text.as_str(), source.as_str()).await;
+    let sentences_added = knowledge.add_text(text.as_str(), source.as_str()).await?;
 
-    Json(AddTextResponse {
+    Ok(Json(AddTextResponse {
         success: true,
         sentences_added
-    })
+    }))
 }
 
 #[derive(Template)]
@@ -86,18 +148,18 @@ struct ReviewTemplate {
     words_that_are_new: Vec<String>
 }
 
-async fn review_get(State(knowledge): State<Knowledge>) -> ReviewTemplate {
-    let review_info = knowledge.get_review_info().await;
-    let sentence_data = knowledge.get_next_sentence_i_plus_one().await;
+async fn review_get(State(knowledge): State<Knowledge>) -> ControllerResult<ReviewTemplate> {
+    let review_info = knowledge.get_review_info().await?;
+    let sentence_data = knowledge.get_next_sentence_i_plus_one().await?;
 
-    ReviewTemplate {
+    Ok(ReviewTemplate {
         sentence_id: sentence_data.sentence_id,
         sentence: sentence_data.sentence_text,
         sentence_source: sentence_data.sentence_source,
         reviews_today_count: review_info.reviews_remaining,
         words_being_reviewed: sentence_data.words_being_reviewed.iter().map(|(_, text)| text.clone()).collect(),
         words_that_are_new: sentence_data.words_that_are_new.iter().map(|(_, text)| text.clone()).collect()
-    }
+    })
 }
 
 #[derive(Deserialize)]
@@ -112,13 +174,13 @@ struct ReviewResponse {
 }
 
 async fn review_post(State(knowledge): State<Knowledge>,
-                     Json(ReviewQuery{ review_sentence_id, response_quality }): Json<ReviewQuery>) -> Json<ReviewResponse> {
+                     Json(ReviewQuery{ review_sentence_id, response_quality }): Json<ReviewQuery>) -> ControllerResult<Json<ReviewResponse>> {
     info!("Reviewing with {} quality", response_quality);
-    knowledge.review_sentence(review_sentence_id, response_quality).await;
+    knowledge.review_sentence(review_sentence_id, response_quality).await?;
 
-    Json(ReviewResponse {
+    Ok(Json(ReviewResponse {
         success: true
-    })
+    }))
 }
 
 #[derive(Parser, Debug)]
@@ -141,11 +203,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
     // Create the knowledge database.
-    let mut knowledge = knowledge::Knowledge::new().await;
+    let mut knowledge = knowledge::Knowledge::new().await?;
 
     // Retokenize our db if specified.
     if args.retokenize {
-        knowledge.retokenize().await
+        knowledge.retokenize().await?
     }
 
     // Create the routes.

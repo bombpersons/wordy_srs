@@ -1,7 +1,8 @@
-use std::{collections::{HashSet, HashMap}, str::FromStr, future::Future, process::{Command, Stdio}, io::{Write}, string};
+use std::{collections::{HashSet, HashMap}, str::FromStr, future::Future, process::{Command, Stdio}, io::{Write}, string, fmt::Display};
 
+use askama::Error;
 use log::info;
-use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow}, ConnectOptions, SqliteConnection, Pool, Sqlite, Row, Transaction, Executor, SqliteExecutor};
+use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow}, ConnectOptions, SqliteConnection, Pool, Sqlite, Row, Transaction, Executor, SqliteExecutor, error::DatabaseError};
 use lindera::tokenizer::Tokenizer;
 use chrono::{Utc, Duration, FixedOffset, Local, Timelike, format::Fixed, DateTime};
 use futures::TryStreamExt;
@@ -130,6 +131,47 @@ pub struct ReviewInfoData {
     pub reviews_remaining: i64
 }
 
+#[derive(Debug)]
+pub enum KnowledgeError {
+    DatabaseError(sqlx::Error),
+    MigrationError(sqlx::migrate::MigrateError),
+    TokenizeError
+}
+
+impl Display for KnowledgeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DatabaseError(e) => write!(f, "Database error! Error: {}", e),
+            Self::MigrationError(e) => write!(f, "Migration error! Error: {}", e),
+            Self::TokenizeError => write!(f, "Error tokenizing sentence!")
+        }
+    }
+}
+
+impl std::error::Error for KnowledgeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::DatabaseError(e) => Some(e),
+            Self::MigrationError(e) => Some(e),
+            Self::TokenizeError => None
+        }
+    }
+}
+
+impl From<sqlx::Error> for KnowledgeError {
+    fn from(value: sqlx::Error) -> Self {
+        KnowledgeError::DatabaseError(value)
+    }
+}
+
+impl From<sqlx::migrate::MigrateError> for KnowledgeError {
+    fn from(value: sqlx::migrate::MigrateError) -> Self {
+        KnowledgeError::MigrationError(value)
+    }
+}
+
+pub type KnowledgeResult<T> = Result<T, KnowledgeError>;
+
 #[derive(Clone)]
 pub struct Knowledge {
     word_freq: WordFrequencyList,
@@ -137,26 +179,24 @@ pub struct Knowledge {
 }
 
 impl Knowledge {
-    pub async fn new() -> Self {
-        // Create the dtabase.
+    pub async fn new() -> Result<Self, KnowledgeError> {
+        // Create the database.
         let connection = SqlitePoolOptions::new()
             .connect_with(SqliteConnectOptions::from_str("db.sqlite").unwrap() // TODO: error handling
                 .create_if_missing(true)
             )
-            .await.unwrap(); // TODO: error handling.
+            .await?;
 
-        sqlx::migrate!().run(&connection).await.unwrap(); // TODO: error handling.
+        // Run migrations.
+        sqlx::migrate!().run(&connection).await?;
 
-        // A tokenizer to split up sentences into words.
-        let tokenizer = Tokenizer::new().unwrap(); // TODO: error handling.
-
-        Self {
+        Ok(Self {
             word_freq: WordFrequencyList::new(),
             connection
-        }
+        })
     }
     
-    fn tokenize_sentence_jumanpp(&self, sentence: &str) -> Vec<String> {
+    fn tokenize_sentence_jumanpp(&self, sentence: &str) -> KnowledgeResult<Vec<String>> {
         let mut jumanpp = Command::new("jumanpp") // TEMP!!
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -207,7 +247,7 @@ impl Knowledge {
                     }
                 }
 
-                words
+                Ok(words)
             },
             Err(e) => {
                 // There was an error, maybe something wrong with the sentence, jumanpp wasn't installed.
@@ -217,30 +257,32 @@ impl Knowledge {
         }
     } 
 
-    pub async fn retokenize(&mut self) -> () {
+    pub async fn retokenize(&mut self) -> KnowledgeResult<()> {
         log::info!("Retokenizing sentences...");
 
         // First open a transaction.
-        let mut tx = self.connection.begin().await.unwrap();
+        let mut tx = self.connection.begin().await?;
 
         // Now clear out the word_sentence table.
+        log::info!("Clearing out word_sentence relationships...");
         sqlx::query("DELETE FROM word_sentence")
-            .execute(&mut *tx).await.unwrap(); // TODO: handle errors
+            .execute(&mut *tx).await?; // TODO: handle errors
 
         // Set the word tables count to 0 for everything
+        log::info!("Setting all words count to 0...");
         sqlx::query("UPDATE words SET count = 0")
-            .execute(&mut *tx).await.unwrap(); // TODO: handle errors
+            .execute(&mut *tx).await?; // TODO: handle errors
 
         // Now go through each sentence and re-tokenize it
+        log::info!("Iterating through all sentences and retokenizing...");
         let mut sentences_to_process = Vec::new();
         {
             let mut sentences_stream = sqlx::query("SELECT id, text, source FROM sentences")
                 .fetch(&mut *tx);
 
-            while let Some(row) = sentences_stream.try_next().await.unwrap() { // TODO: error handling
-                let sentence: String = row.try_get("text").unwrap();
-                let source: String = row.try_get("source").unwrap();
-                let id: i64 = row.try_get("id").unwrap();
+            while let Some(row) = sentences_stream.try_next().await? { // TODO: error handling
+                let sentence: String = row.try_get("text")?;
+                let id: i64 = row.try_get("id")?;
 
                 sentences_to_process.push((id, sentence));
             }
@@ -249,17 +291,18 @@ impl Knowledge {
         // Now the stream is closed...
         for (id, text) in sentences_to_process {
             // Tokenize
-            let words = self.tokenize_sentence_jumanpp(text.as_str());
+            let words = self.tokenize_sentence_jumanpp(text.as_str())?;
 
             // Re-add the sentences
             self.add_words_to_sentence(id, words, &mut *tx).await;
         }
 
-        tx.commit().await.unwrap(); // TODO: handle errors
+        tx.commit().await?;
 
         log::info!("Finished re-tokenizing");
 
         // Done!
+        Ok(())
     }
 
     fn get_end_of_day_time(&self) -> DateTime<FixedOffset> {
@@ -276,7 +319,7 @@ impl Knowledge {
     }
 
     // Get a vector containing a tuple of word id and word text for all the words in a sentence.
-    async fn get_words_in_sentence(&self, sentence_id: i64) -> Vec<(i64, String)> {
+    async fn get_words_in_sentence(&self, sentence_id: i64) -> KnowledgeResult<Vec<(i64, String)>> {
         let mut words = sqlx::query("
             SELECT word_id, sentence_id, words.text as word_text
             FROM word_sentence
@@ -286,14 +329,14 @@ impl Knowledge {
             .fetch(&self.connection);
 
         let mut word_vec = Vec::new();
-        while let Some(word_row) = words.try_next().await.unwrap() { // TODO: error handling.
-            word_vec.push((word_row.try_get("word_id").unwrap(), word_row.try_get("word_text").unwrap()));
+        while let Some(word_row) = words.try_next().await? { // TODO: error handling.
+            word_vec.push((word_row.try_get("word_id")?, word_row.try_get("word_text")?));
         }
 
-        word_vec
+        Ok(word_vec)
     }
 
-    async fn get_words_in_sentence_that_need_reviewing(&self, sentence_id: i64) -> Vec<(i64, String)> {
+    async fn get_words_in_sentence_that_need_reviewing(&self, sentence_id: i64) -> KnowledgeResult<Vec<(i64, String)>> {
         // First bit of useful info is how many reviews there are for today.
         let end_of_day_time = self.get_end_of_day_time();
         let now_time = Local::now().fixed_offset();
@@ -314,14 +357,14 @@ impl Knowledge {
             .fetch(&self.connection);
 
         let mut word_vec = Vec::new();
-        while let Some(word_row) = words.try_next().await.unwrap() { // TODO: error handling.
-            word_vec.push((word_row.try_get("word_id").unwrap(), word_row.try_get("word_text").unwrap()));
+        while let Some(word_row) = words.try_next().await? { // TODO: error handling.
+            word_vec.push((word_row.try_get("word_id")?, word_row.try_get("word_text")?));
         }
 
-        word_vec
+        Ok(word_vec)
     }
 
-    async fn get_words_in_sentence_that_are_new(&self, sentence_id: i64) -> Vec<(i64, String)> {
+    async fn get_words_in_sentence_that_are_new(&self, sentence_id: i64) -> KnowledgeResult<Vec<(i64, String)>> {
         let mut words = sqlx::query("
             SELECT word_id, sentence_id, words.text as word_text, words.next_review_at
             FROM word_sentence
@@ -332,55 +375,14 @@ impl Knowledge {
             .fetch(&self.connection);
 
         let mut word_vec = Vec::new();
-        while let Some(word_row) = words.try_next().await.unwrap() { // TODO: error handling.
-            word_vec.push((word_row.try_get("word_id").unwrap(), word_row.try_get("word_text").unwrap()));
+        while let Some(word_row) = words.try_next().await? { // TODO: error handling.
+            word_vec.push((word_row.try_get("word_id")?, word_row.try_get("word_text")?));
         }
 
-        word_vec
+        Ok(word_vec)
     }
 
-    // [[ This query kind of finds sentences with fewest new words in them. ]]
-    // SELECT word_id, sentence_id, sentences.text AS sentence_text, sentences.id, words.text AS word_text, words.frequency as word_frequency, words.reviewed as word_reviewed, AVG(words.frequency), COUNT(words.frequency)
-    // FROM word_sentence
-    //     INNER JOIN sentences ON sentences.id = sentence_id
-    //     INNER JOIN words ON words.id = word_id
-    // WHERE 
-    //     word_reviewed = FALSE
-    // GROUP BY
-    //     sentence_id
-    // ORDER by
-    //     COUNT(words.frequency)
-    
-    // [[ This query finds a sentence that contains the most words that need to be reviewed now. ]]
-    // SELECT word_id, sentence_id, sentences.text AS sentence_text, sentences.id, words.next_review_at as review_at, AVG(words.frequency), COUNT(words.frequency)
-    // FROM word_sentence
-    //     INNER JOIN sentences ON sentences.id = sentence_id
-    //     INNER JOIN words ON words.id = word_id
-    // WHERE 
-    //     DATETIME(review_at) < DATETIME("2023-10-12T18:42:45+01:00")
-    // GROUP BY
-    //     sentence_id
-    // ORDER BY
-    //     COUNT(words.frequency) DESC
-    // LIMIT 1
-
-    // [[ This query finds sentences that contain the most words that need reviewing with the least amount of unknown words. ]]
-    // SELECT 
-    //     word_id, sentence_id, 
-    //     sentences.text AS sentence_text, sentences.id, 
-    //     words.next_review_at as review_at, words.reviewed AS reviewed, 
-    //     SUM(CASE WHEN datetime(words.next_review_at) < datetime("2023-10-12T18:42:45+01:00") THEN 1 ELSE 0 END) as words_that_need_reviewing,
-    //     SUM(CASE WHEN words.reviewed = FALSE THEN 1 ELSE 0 END) as words_that_are_new
-    // FROM word_sentence
-    //     INNER JOIN sentences ON sentences.id = sentence_id
-    //     INNER JOIN words ON words.id = word_id
-    // GROUP BY
-    //     sentence_id
-    // ORDER BY
-    //     words_that_need_reviewing DESC,
-    //     words_that_are_new ASC
-
-    pub async fn get_next_sentence_i_plus_one(&self) -> IPlusOneSentenceData {
+    pub async fn get_next_sentence_i_plus_one(&self) -> KnowledgeResult<IPlusOneSentenceData> {
         let end_of_day_time = self.get_end_of_day_time();
         let now_time = Local::now().fixed_offset();
 
@@ -418,35 +420,35 @@ impl Knowledge {
                 
             Ok(row) => {
                 // If there are no words that need reviewing in the selected sentence then we don't have any sentences to review!
-                let words_that_need_reviewing: i64 = row.try_get("words_that_need_reviewing").unwrap();
-                let words_that_are_new: i64 = row.try_get("words_that_are_new").unwrap();
-                let sentence_text: String = row.try_get("sentence_text").unwrap();
+                let words_that_need_reviewing: i64 = row.try_get("words_that_need_reviewing")?;
+                let words_that_are_new: i64 = row.try_get("words_that_are_new")?;
+                let sentence_text: String = row.try_get("sentence_text")?;
                 info!("Found a sentence with {} words that need reviewing and {} new words. Sentence: {}", words_that_need_reviewing, words_that_are_new, sentence_text);
 
                 // If there are words that need reviewing, do that!
                 if words_that_need_reviewing > 0 {
                     // If we review this sentence we'll be reviewing some of the words we need to review. Return it!
-                    let sentence_id = row.try_get("sentence_id").unwrap();
-                    let sentence_text = row.try_get("sentence_text").unwrap();
-                    let words_being_reviewed = self.get_words_in_sentence_that_need_reviewing(sentence_id).await;
-                    let words_that_are_new = self.get_words_in_sentence_that_are_new(sentence_id).await;
-                    let sentence_source = row.try_get("source").unwrap();
+                    let sentence_id = row.try_get("sentence_id")?;
+                    let words_being_reviewed = self.get_words_in_sentence_that_need_reviewing(sentence_id).await?;
+                    let words_that_are_new = self.get_words_in_sentence_that_are_new(sentence_id).await?;
+                    let sentence_source = row.try_get("source")?;
 
-                    return IPlusOneSentenceData {
+                    return Ok(IPlusOneSentenceData {
                         sentence_id,
                         sentence_text,
                         sentence_source,
                         words_being_reviewed,
                         words_that_are_new
-                    };
+                    });
                 }
             },
             Err(sqlx::Error::RowNotFound) => {
                 // This ok, there might not be any sentences that have 0 new words.
                 // Just continue and try the next query for new sentences and words.
+                log::info!("Couldn't find a sentence that contains no new words!")
             },
             Err(e) => {
-                panic!();
+                return Err(KnowledgeError::from(e));
             }
         };
 
@@ -475,48 +477,58 @@ impl Knowledge {
             .await {
 
             Ok(row) => {
-                let words_that_are_new: i64 = row.try_get("words_that_are_new").unwrap();
-                let averag_word_count: f64 = row.try_get("average_new_word_count").unwrap();
+                let words_that_are_new: i64 = row.try_get("words_that_are_new")?;
+                let averag_word_count: f64 = row.try_get("average_new_word_count")?;
                 info!("Found a sentence with {} new words with an average {} word count", words_that_are_new, averag_word_count);
 
-                let sentence_id = row.try_get("sentence_id").unwrap();
-                let sentence_text = row.try_get("sentence_text").unwrap();
-                let words_being_reviewed = self.get_words_in_sentence_that_need_reviewing(sentence_id).await;
-                let words_that_are_new = self.get_words_in_sentence_that_are_new(sentence_id).await;
-                let sentence_source = row.try_get("source").unwrap();
+                let sentence_id = row.try_get("sentence_id")?;
+                let sentence_text = row.try_get("sentence_text")?;
+                let words_being_reviewed = self.get_words_in_sentence_that_need_reviewing(sentence_id).await?;
+                let words_that_are_new = self.get_words_in_sentence_that_are_new(sentence_id).await?;
+                let sentence_source = row.try_get("source")?;
 
-                IPlusOneSentenceData {
+                Ok(IPlusOneSentenceData {
                     sentence_id,
                     sentence_text,
                     sentence_source,
                     words_being_reviewed,
                     words_that_are_new
-                }
+                })
             },
 
-            Err(e) => {
-                log::error!("{}", e);
-
-                IPlusOneSentenceData {
+            Err(sqlx::Error::RowNotFound) => {
+                // Not entirely unexpected. It's possible there are no sentences with anything new to review.
+                // TODO: This probably ought to be handled a bit better.
+                // the page should probably not even show the review UI if there isn't anything to review.
+                // It is a rather uncommon case however, especially if you have any decent amount of sentences in your database.
+                // Probably will only appear to a user when they don't have any sentences in their database.
+                Ok(IPlusOneSentenceData {
                     sentence_id: 0,
                     sentence_text: "No sentence with any new words and no words are scheduled for reviewing.".to_string(),
                     sentence_source: "".to_string(),
                     words_being_reviewed: vec![(0, "".to_string())],
                     words_that_are_new: vec![(0, "".to_string())]
-                }
+                })
+            },
+
+            Err(e) => {
+                // We weren't expecting this error!
+                Err(KnowledgeError::from(e))
             }
         }
     }
 
-    pub async fn review_sentence(&self, sentence_id: i64, response_quality: f64) {
+    pub async fn review_sentence(&self, sentence_id: i64, response_quality: f64) -> KnowledgeResult<()> {
         // Find all the words in the sentence and then review them all!
-        let words = self.get_words_in_sentence(sentence_id).await;
+        let words = self.get_words_in_sentence(sentence_id).await?;
         for (word_id, word_text) in words {
-            self.review_word(word_id, response_quality).await;
+            self.review_word(word_id, response_quality).await?;
         }
+
+        Ok(())
     }
 
-    pub async fn get_review_info(&self) -> ReviewInfoData {
+    pub async fn get_review_info(&self) -> Result<ReviewInfoData, KnowledgeError> {
         // First bit of useful info is how many reviews there are for today.
         let end_of_day_time = self.get_end_of_day_time();
         let now_time = Local::now().fixed_offset();
@@ -529,21 +541,21 @@ impl Knowledge {
             .bind(end_of_day_time.to_rfc3339())
             .bind(now_time.to_rfc3339())
             .fetch_one(&self.connection).await.unwrap() // TODO: error handling.
-            .try_get(0).unwrap();
+            .try_get(0)?;
         
 
-        ReviewInfoData {
+        Ok(ReviewInfoData {
             reviews_remaining: review_count
-        }
+        })
     }
 
-    pub async fn review_word(&self, review_word_id: i64, response_quality: f64) {
+    pub async fn review_word(&self, review_word_id: i64, response_quality: f64) -> KnowledgeResult<()> {
         // First bit of useful info is how many reviews there are for today.
         let end_of_day_time = self.get_end_of_day_time();
         let now_time = Local::now().fixed_offset();
 
         // Get data related to the supermemo algorithm from the database.
-        match sqlx::query("
+        let word_row = sqlx::query("
             SELECT id, text, repitition, e_factor, review_duration, next_review_at, reviewed
             FROM words
                 WHERE id = ?
@@ -553,75 +565,66 @@ impl Knowledge {
             .bind(review_word_id)
             .bind(end_of_day_time.to_rfc3339())
             .bind(now_time.to_rfc3339())
-            .fetch_one(&self.connection).await {
+            .fetch_one(&self.connection).await?;
 
-            Ok(word_row) => {
-                // We found the word and it is a word that needs reviewing, or is a new word, so review it.
-                
-                // If this is a new word, use the default supermemo item.
-                let reviewed: bool = word_row.try_get("reviewed").unwrap();
-                let mut sm = if !reviewed { 
-                    SuperMemoItem::default()
-                } else {
-                    SuperMemoItem {
-                        repitition: word_row.try_get("repitition").unwrap(),
-                        e_factor: word_row.try_get("e_factor").unwrap(),
-                        duration: Duration::seconds(word_row.try_get("review_duration").unwrap())
-                    }
-                };
-
-                // Calculate the values for the next review.
-                sm = super_memo_2(sm, response_quality);
-                let next_review_at = (Local::now().fixed_offset() + sm.duration).to_rfc3339();
-        
-                info!("Reviewing word id {}, updated review data: {:?}", review_word_id, &sm);
-        
-                // Store it.
-                {
-                    let mut tx = self.connection.begin().await.unwrap();
-                    sqlx::query("
-                        UPDATE words
-                        SET repitition = ?,
-                            e_factor = ?,
-                            review_duration = ?,
-                            next_review_at = ?,
-                            reviewed = TRUE,
-                            date_first_reviewed = CASE WHEN date_first_reviewed IS NULL THEN ? ELSE date_first_reviewed END
-                        WHERE 
-                            id = ?")
-                        .bind(sm.repitition)
-                        .bind(sm.e_factor)
-                        .bind(sm.duration.num_seconds())
-                        .bind(next_review_at)
-                        .bind(now_time.to_rfc3339())
-                        .bind(review_word_id)
-                        .execute(&mut *tx).await.unwrap(); // TODO: error handling
-        
-                    tx.commit().await.unwrap(); // TODO: error handling
-                }
-
-            },
-            Err(e) => {
-                // There was an error (or there wasn't any word that matched.)
-                // This is hopefully because the word doesn't need reviewing yet.
-                // In this case we want to nothing other than log it.
-                info!("Word with id {} doesn't need reviewing yet!", review_word_id);
+        // We found the word and it is a word that needs reviewing, or is a new word, so review it.
+        // If this is a new word, use the default supermemo item.
+        let reviewed: bool = word_row.try_get("reviewed")?;
+        let mut sm = if !reviewed { 
+            SuperMemoItem::default()
+        } else {
+            SuperMemoItem {
+                repitition: word_row.try_get("repitition")?,
+                e_factor: word_row.try_get("e_factor")?,
+                duration: Duration::seconds(word_row.try_get("review_duration")?)
             }
+        };
+
+        // Calculate the values for the next review.
+        sm = super_memo_2(sm, response_quality);
+        let next_review_at = (Local::now().fixed_offset() + sm.duration).to_rfc3339();
+
+        info!("Reviewing word id {}, updated review data: {:?}", review_word_id, &sm);
+
+        // Store it.
+        {
+            let mut tx = self.connection.begin().await?;
+            sqlx::query("
+                UPDATE words
+                SET repitition = ?,
+                    e_factor = ?,
+                    review_duration = ?,
+                    next_review_at = ?,
+                    reviewed = TRUE,
+                    date_first_reviewed = CASE WHEN date_first_reviewed IS NULL THEN ? ELSE date_first_reviewed END
+                WHERE 
+                    id = ?")
+                .bind(sm.repitition)
+                .bind(sm.e_factor)
+                .bind(sm.duration.num_seconds())
+                .bind(next_review_at)
+                .bind(now_time.to_rfc3339())
+                .bind(review_word_id)
+                .execute(&mut *tx).await?;
+
+            tx.commit().await?; // TODO: error handling
         }
+
+        Ok(())
     }
 
-    async fn add_sentence(&mut self, sentence: &str, source: &str) {
+    async fn add_sentence(&mut self, sentence: &str, source: &str) -> KnowledgeResult<()> {
         info!("Adding sentence {} from source {}", sentence, source);
 
         // Get the current datetime
         let now_time = Local::now().fixed_offset();
 
         // Tokenize the sentence to get the words.
-        let words = self.tokenize_sentence_jumanpp(sentence);
+        let words = self.tokenize_sentence_jumanpp(sentence)?;
         log::info!("Contains words: {:?}", words);
 
         // Start a database transaction.
-        let mut tx = self.connection.begin().await.unwrap(); // TODO: error handling
+        let mut tx = self.connection.begin().await?;
 
         // Insert the sentence to the sentences table.
         let sentence_id: Option<i64> = match sqlx::query(
@@ -640,14 +643,16 @@ impl Knowledge {
         // If the sentence already existed, then we haven't done anything and we don't have a new sentence id.
         // The words will have already been inserted the first time we added the sentence.
         if let Some(sentence_id) = sentence_id  {
-            self.add_words_to_sentence(sentence_id, words, &mut tx).await;
+            self.add_words_to_sentence(sentence_id, words, &mut tx).await?;
         }
 
         // Commit to the transaction.
-        tx.commit().await.unwrap(); // TODO: error handling
+        tx.commit().await?; // TODO: error handling
+
+        Ok(())
     }
 
-    async fn add_words_to_sentence(&mut self, id: i64, words: Vec<String>, tx: &mut SqliteConnection) {
+    async fn add_words_to_sentence(&mut self, id: i64, words: Vec<String>, tx: &mut SqliteConnection) -> KnowledgeResult<()> {
         let now_time = Local::now().fixed_offset();
 
         log::info!("Adding words {:?}", words);
@@ -664,7 +669,7 @@ impl Knowledge {
                     .bind(freq)
                     .bind(&word)
                     .bind(now_time.to_rfc3339())
-                    .execute(&mut *tx).await.expect("Error adding word!");
+                    .execute(&mut *tx).await?;
 
             // Create the word->sentence relationship.
             let word_id: i64 = sqlx::query(
@@ -672,26 +677,28 @@ impl Knowledge {
                         FROM words
                         WHERE text = ?")
                 .bind(&word)
-                .fetch_one(&mut *tx).await.expect("Couldn't find word in database!")
-                .try_get("id").expect("No id in word table");
+                .fetch_one(&mut *tx).await?
+                .try_get("id")?;
 
             sqlx::query(
                     "INSERT OR IGNORE INTO word_sentence(word_id, sentence_id)
                         VALUES(?, ?);")
                 .bind(word_id)
                 .bind(id)
-                .execute(&mut *tx).await.expect("Couldn't add word->sentence relationship.");
+                .execute(&mut *tx).await?;
         }
+
+        Ok(())
     }
 
-    pub async fn add_text(&mut self, text: &str, source: &str) -> i64 {
+    pub async fn add_text(&mut self, text: &str, source: &str) -> KnowledgeResult<i64> {
         let sentences = iterate_sentences(text);
         let sentences_count = sentences.len();
         for sentence in sentences {
             // Split the sentence into words and add that to the database.
-            self.add_sentence(sentence.as_str(), source).await;
+            self.add_sentence(sentence.as_str(), source).await?;
         }
 
-        sentences_count as i64
+        Ok(sentences_count as i64)
     }
 }
