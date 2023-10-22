@@ -1,0 +1,10 @@
+services:
+  wordy_srs:
+    image: wordy_srs
+    build:
+      context: ../
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ../db.sqlite:/app/db.sqlite
+    ports:
+      - "8000:8000"

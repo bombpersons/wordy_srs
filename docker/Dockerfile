@@ -5,7 +5,7 @@ COPY . .
 RUN cargo install --path .
 
 # Build jumanpp 
-FROM debian:sid-slim
+FROM debian:sid-slim as jumanpp_builder
 
 ARG JPP_VERSION=2.0.0-rc4
 ARG JPP_PATH=/usr/local
@@ -27,10 +27,18 @@ RUN cmake ../jumanpp-${JPP_VERSION} \
     -DCMAKE_INSTALL_PREFIX=${JPP_PATH}
 RUN make install
 
+# The final image without any build tools.
+FROM debian:sid-slim
+ENV PATH=${JPP_PATH}/bin:$PATH
+
 WORKDIR /app
 
 # Copy over the built rust app to this image.
 COPY --from=rust_builder /usr/local/cargo/bin/wordy_srs /app
+
+# Copy over jumanpp
+COPY --from=jumanpp_builder /usr/local/bin/jumanpp /usr/local/bin/jumanpp
+COPY --from=jumanpp_builder /usr/local/libexec/jumanpp /usr/local/libexec/jumanpp
 
 CMD ["/app/wordy_srs"]
 #CMD ls /app/bin -a

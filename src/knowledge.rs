@@ -118,14 +118,6 @@ fn iterate_sentences(text: &str) -> Vec<String> {
     sentences
 }
 
-pub struct SentenceData {
-    // The sentence and word that we are reviewing.
-    pub sentence_text: String,
-    pub sentence_id: i64,
-    pub word_text: String,
-    pub word_id: i64
-}
-
 pub struct IPlusOneSentenceData {
     pub sentence_text: String,
     pub sentence_id: i64,
@@ -140,7 +132,6 @@ pub struct ReviewInfoData {
 
 #[derive(Clone)]
 pub struct Knowledge {
-    tokenizer: Tokenizer,
     word_freq: WordFrequencyList,
     connection: Pool<Sqlite>
 }
@@ -160,27 +151,13 @@ impl Knowledge {
         let tokenizer = Tokenizer::new().unwrap(); // TODO: error handling.
 
         Self {
-            tokenizer,
             word_freq: WordFrequencyList::new(),
             connection
         }
     }
-
-    fn tokenize_sentence_lindera(&self, sentence: &str) -> Vec<String> {
-        let tokens = self.tokenizer.tokenize(sentence).unwrap();
-        let mut words = Vec::<String>::new();
-        for token in tokens {
-            if token.detail.len() > 7 {
-                let base_form = &token.detail[6];
-                words.push(base_form.to_string());
-            }
-        }
     
-        words
-    }
-
     fn tokenize_sentence_jumanpp(&self, sentence: &str) -> Vec<String> {
-        let mut jumanpp = Command::new("C:/jumanpp/jumanpp.bat") // TEMP!!
+        let mut jumanpp = Command::new("jumanpp") // TEMP!!
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn().unwrap(); // TODO: Erro handling!
