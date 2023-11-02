@@ -91,8 +91,8 @@ impl WordFrequencyList {
 // Try and split up a text into sentences.
 fn iterate_sentences(text: &str) -> Vec<String> {
     let terminators: HashSet<char> = HashSet::from(['。', '\n', '！', '？']);
-    let open_quotes: HashSet<char> = HashSet::from(['「', '『']);
-    let close_quotes: HashSet<char> = HashSet::from(['」', '』']);
+    let open_quotes: HashSet<char> = HashSet::from(['「', '『', '（']);
+    let close_quotes: HashSet<char> = HashSet::from(['」', '』', '）']);
 
     let mut depth: i32 = 0;
     let mut curr_string: String = String::new();
@@ -528,7 +528,7 @@ impl Knowledge {
         Ok(())
     }
 
-    pub async fn get_review_info(&self) -> Result<ReviewInfoData, KnowledgeError> {
+    pub async fn get_review_info(&self) -> KnowledgeResult<ReviewInfoData> {
         // First bit of useful info is how many reviews there are for today.
         let end_of_day_time = self.get_end_of_day_time();
         let now_time = Local::now().fixed_offset();
@@ -555,7 +555,7 @@ impl Knowledge {
         let now_time = Local::now().fixed_offset();
 
         // Get data related to the supermemo algorithm from the database.
-        let word_row = sqlx::query("
+        match sqlx::query("
             SELECT id, text, repitition, e_factor, review_duration, next_review_at, reviewed
             FROM words
                 WHERE id = ?
@@ -565,52 +565,65 @@ impl Knowledge {
             .bind(review_word_id)
             .bind(end_of_day_time.to_rfc3339())
             .bind(now_time.to_rfc3339())
-            .fetch_one(&self.connection).await?;
+            .fetch_one(&self.connection).await {
+            
+            Ok(row) => {
+                // We found the word and it is a word that needs reviewing, or is a new word, so review it.
+                // If this is a new word, use the default supermemo item.
+                let reviewed: bool = row.try_get("reviewed")?;
+                let mut sm = if !reviewed { 
+                    SuperMemoItem::default()
+                } else {
+                    SuperMemoItem {
+                        repitition: row.try_get("repitition")?,
+                        e_factor: row.try_get("e_factor")?,
+                        duration: Duration::seconds(row.try_get("review_duration")?)
+                    }
+                };
 
-        // We found the word and it is a word that needs reviewing, or is a new word, so review it.
-        // If this is a new word, use the default supermemo item.
-        let reviewed: bool = word_row.try_get("reviewed")?;
-        let mut sm = if !reviewed { 
-            SuperMemoItem::default()
-        } else {
-            SuperMemoItem {
-                repitition: word_row.try_get("repitition")?,
-                e_factor: word_row.try_get("e_factor")?,
-                duration: Duration::seconds(word_row.try_get("review_duration")?)
+                // Calculate the values for the next review.
+                sm = super_memo_2(sm, response_quality);
+                let next_review_at = (Local::now().fixed_offset() + sm.duration).to_rfc3339();
+
+                info!("Reviewing word id {}, updated review data: {:?}", review_word_id, &sm);
+
+                // Store it.
+                {
+                    let mut tx = self.connection.begin().await?;
+                    sqlx::query("
+                        UPDATE words
+                        SET repitition = ?,
+                            e_factor = ?,
+                            review_duration = ?,
+                            next_review_at = ?,
+                            reviewed = TRUE,
+                            date_first_reviewed = CASE WHEN date_first_reviewed IS NULL THEN ? ELSE date_first_reviewed END
+                        WHERE 
+                            id = ?")
+                        .bind(sm.repitition)
+                        .bind(sm.e_factor)
+                        .bind(sm.duration.num_seconds())
+                        .bind(next_review_at)
+                        .bind(now_time.to_rfc3339())
+                        .bind(review_word_id)
+                        .execute(&mut *tx).await?;
+
+                    tx.commit().await?;
+                }
+
+                Ok(())
+            },
+
+            Err(sqlx::Error::RowNotFound) => {
+                // The word wasn't found. This should be because the word didn't need reviewing.
+                log::info!("Word id {} doesn't need reviewing.", review_word_id);
+                Ok(())
+            },
+
+            Err(e) => {
+                Err(KnowledgeError::DatabaseError(e))
             }
-        };
-
-        // Calculate the values for the next review.
-        sm = super_memo_2(sm, response_quality);
-        let next_review_at = (Local::now().fixed_offset() + sm.duration).to_rfc3339();
-
-        info!("Reviewing word id {}, updated review data: {:?}", review_word_id, &sm);
-
-        // Store it.
-        {
-            let mut tx = self.connection.begin().await?;
-            sqlx::query("
-                UPDATE words
-                SET repitition = ?,
-                    e_factor = ?,
-                    review_duration = ?,
-                    next_review_at = ?,
-                    reviewed = TRUE,
-                    date_first_reviewed = CASE WHEN date_first_reviewed IS NULL THEN ? ELSE date_first_reviewed END
-                WHERE 
-                    id = ?")
-                .bind(sm.repitition)
-                .bind(sm.e_factor)
-                .bind(sm.duration.num_seconds())
-                .bind(next_review_at)
-                .bind(now_time.to_rfc3339())
-                .bind(review_word_id)
-                .execute(&mut *tx).await?;
-
-            tx.commit().await?; // TODO: error handling
         }
-
-        Ok(())
     }
 
     async fn add_sentence(&mut self, sentence: &str, source: &str) -> KnowledgeResult<()> {
