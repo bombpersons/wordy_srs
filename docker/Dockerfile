@@ -42,4 +42,4 @@ COPY --from=jumanpp_builder /usr/local/libexec/jumanpp /usr/local/libexec/jumanp
 
 CMD ["/app/wordy_srs"]
 #CMD ls /app/bin -a
-EXPOSE 8000
+EXPOSE 49494

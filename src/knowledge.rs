@@ -219,7 +219,9 @@ impl Knowledge {
                 // that and only take one version of the word.
                 if output.status.success() {
                     for line in data.lines() {
-                        // Ignore lines that start with '@'
+                        // Ignore lines that start with '@', these specify aliases (for words that have exactly the same spelling.)
+                        // For now we'll just ignore these, there's no way for us to know which alias is the 'correct' one so just pick
+                        // the first one (most common).
                         if line.starts_with('@') {
                             continue;
                         }
@@ -234,15 +236,16 @@ impl Knowledge {
                         // in the last fields anyway, so it's probably fine.) It might be a good idea to look
                         // at doing this properly at some point though. Maybe when I go through and sort out all of the error handling.
                         if parts.len() >= 12 {
-                            let deconjugated = parts[2];
+                            let dictionary_form = parts[2];
+                            let word_type = parts[3];
 
                             // Okay, so for some reason '\␣' is used to refer to a space.
                             // We uh don't want to include these.
-                            if deconjugated == r"\␣" {
+                            if dictionary_form == r"\␣" {
                                 continue;
                             }
 
-                            words.push(deconjugated.to_string());
+                            words.push(dictionary_form.to_string());
                         }
                     }
                 }
