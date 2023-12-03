@@ -297,7 +297,7 @@ impl Knowledge {
             let words = self.tokenize_sentence_jumanpp(text.as_str())?;
 
             // Re-add the sentences
-            self.add_words_to_sentence(id, words, &mut *tx).await;
+            self.add_words_to_sentence(id, words, &mut *tx).await?;
         }
 
         tx.commit().await?;

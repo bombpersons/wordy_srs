@@ -220,7 +220,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_state(knowledge);
 
     // Start the server.
-    axum::Server::bind(&"0.0.0.0:8000".parse().unwrap())
+    axum::Server::bind(&"0.0.0.0:49494".parse().unwrap())
         .serve(app.into_make_service())
         .await?;
 
