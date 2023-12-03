@@ -7,4 +7,4 @@ services:
     volumes:
       - ../db.sqlite:/app/db.sqlite
     ports:
-      - "8000:8000"
+      - "49494:49494"
